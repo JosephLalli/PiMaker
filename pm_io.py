@@ -10,7 +10,7 @@ from collections import defaultdict, OrderedDict
 import os
 from timeit import default_timer as timer
 
-# x = timeit(create_combined_reference_Array, n=1, return_result=True, args=[ref_fasta])
+
 
 def timeit(func, n=10, return_result=False, args=list(), kwargs=dict()):
     def wrapper(func, args=list(), kwargs=dict()):  # don't return results; prevents calcing time dealing w/ memory allocation of results
