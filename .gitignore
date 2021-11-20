@@ -17,3 +17,7 @@ format.pyx
 format.pxd
 test_data/Mammalian
 test_data/drosophilia
+misc.note
+.gitignore
+pimaker-env
+misc.txt

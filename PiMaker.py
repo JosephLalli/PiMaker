@@ -1,22 +1,34 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# What am I trying to do? Trying to create something that, given a VCF/DF of SNPs, a reference sequence, and a GTF,
-# it will determine the PiN/PiS by GTF category
-# from typing_extensions import Concatenate
 import numpy as np
 import pandas as pd
 import os
-from itertools import combinations, chain
-from pm_io import create_combined_reference_Array, get_num_var, parseGTF, read_mutation_rates
-from generate_filters import make_num_sites_dict, make_synon_nonsynon_site_dict, generate_codon_synon_mutation_filters, translate
+from pm_io import create_combined_reference_Array, get_num_var, get_sample_list, parseGTF, read_mutation_rates
+from generate_filters import make_num_sites_dict, make_synon_nonsynon_site_dict, generate_codon_synon_mutation_filters
+import multiprocessing as mp
+from mp_utils import mp_iterate_records, process_chunk
+import pysam
+from tqdm import tqdm
+# from __main__ import main
+# import line_profiler, builtins
+# profile = line_profiler.LineProfiler()
+# builtins.__dict__['profile'] = profile
 
-nuc_array = np.concatenate((np.eye(4, dtype=np.int16), np.zeros((1,4), dtype=np.int16)))
+vcf_file = '/mnt/d/projects/pimaker/test_data/drosophilia/dest.PoolSeq.PoolSNP.001.50.10Nov2020.ann.vcf.gz'
+ref_fasta = '/mnt/d/projects/pimaker/test_data/drosophilia/dmel-all-chromosome-r6.12.fasta.gz'
+gtf_file = '/mnt/d/projects/pimaker/test_data/drosophilia/dmel-all-r6.12.gtf.gz'
+
+
+nuc_array = np.concatenate((np.eye(4, dtype=np.int16), np.zeros((1, 4), dtype=np.int16)))
 nuc_tuple = tuple(map(tuple, nuc_array))
 nucs = "ACGTN"
-tuple_dict = {nucs[i]:t for i,t in enumerate(nuc_tuple)}
+tuple_dict = {nucs[i]: t for i, t in enumerate(nuc_tuple)}
 
 synonPiTranslate, nonSynonPiTranslate = generate_codon_synon_mutation_filters()
+
+# num_processes=1; maf = 0.01; mutation_rates = None; rollingWindow=None; synon_nonsynon=False; include_stop_codons=False; binsize=int(1e6)
+
 
 mutation_rates={  #source: Pauley, Procario, Lauring 2017: A novel twelve class fluctuation test reveals higher than expected mutation rates for influenza A viruses
     'A':{'A': 1, 'C':0.41, 'G':4.19, 'T':0.16},
@@ -25,520 +37,160 @@ mutation_rates={  #source: Pauley, Procario, Lauring 2017: A novel twelve class 
     'T':{'A':0.06,'C':3.83,'G':0.45, 'T': 1}
 }
 
-def calc_overlaps_and_reading_frames(gene_slices, gene_coords, bin_start, bin_end):
-    reading_frames = np.zeros(shape=(bin_end-bin_start, 6), dtype=bool)
-    gene_frames = {g:{e:None for e in s} for g, s in gene_coords.items()}
-    for g, s in gene_coords.items():
-        for exon in s:
-            exon_read_frame = determine_read_frame(bin_start, exon[0], exon[1])
-            gene_frames[g][exon] = exon_read_frame
-            reading_frames[min(exon):max(exon), exon_read_frame] = True
-    np.where(reading_frames.sum(1) > 1)[0]
-    overlaps = np.where(reading_frames.sum(1) > 1)[0]
-    overlap_dict = {g:np.intersect1d(overlaps,v)[::np.sign(v[-1]-v[0])] for g,v in gene_slices.items()}
-    return {k:v for k,v in overlap_dict.items() if len(v) > 0}, gene_frames
 
-    # all_sites = np.hstack(list(gene_slices.values()))
-    # num_sites = np.unique(all_sites, return_counts=True)[1]
-    # overlap_sites = all_sites[np.where(num_sites>1)[0]]
-    # overlaps = {gene:set(gene_slice).intersection(set(overlap_sites)) for gene, gene_slice in gene_slices.items()}
-    # 
-
-# def calc_overlaps(codingCoords, coords_reference='contig', ignore=[None]):
-#     overlaps = dict()
-#     for contig, genedict in codingCoords.items():
-#         length = len(genedict)
-#         if length == 1:
-#             continue
-#         elif any([gene in ignore for gene in genedict.keys()]):
-#             for gene in ignore:
-#                 try:
-#                     del codingCoords[contig][gene]
-#                 except KeyError:
-#                     continue
-#         else:
-#             gene_spans = list(genedict.values())
-#             one_gene_sites = set(range(0,5000))
-            
-#             for spans in gene_spans:
-#                 gene_range = set()
-#                 for start, end in spans:
-#                     gene_range = gene_range.union(set(range(start, end+1)))
-#                 one_gene_sites = one_gene_sites.intersection(gene_range)
-#             one_gene_sites = sorted(list(one_gene_sites))
-            
-#             #identify overlaps in 
-            
-            
-#             for gene, spans in genedict.items():
-#                 ranges = list()
-#                 start_of_gene = spans[0][0]
-#                 start = start_of_gene
-#                 end = 0
-#                 for i in range(len(one_gene_sites)-1):
-#                     if one_gene_sites[i]+1 == one_gene_sites[i+1]:
-#                         continue
-#                     else: #if there's a gap in one_gene_sites
-#                         end = one_gene_sites[i]
-#                         if coords_reference=='contig':
-#                             ranges.append((start, end+1))
-#                         elif coords_reference=='in_concat_gene':
-#                             ranges.append((start-start_of_gene, end-start_of_gene+1))
-#                         else:
-#                             ranges.append((start-start_of_gene, end-start_of_gene+1))
-#                         start = one_gene_sites[i+1]
-#                         end = 0
-#                 end = one_gene_sites[-1]
-#                 if coords_reference=='contig':
-#                     ranges.append((start, end+1))
-#                 elif coords_reference=='in_concat_gene':
-#                     ranges.append((start-start_of_gene, end-start_of_gene+1))
-#                 else:
-#                     ranges.append((start-start_of_gene, end-start_of_gene+1))
-#                 overlaps[gene] = ranges
-#     return overlaps
-
-
-
-def range_overlap(r1, r2):
-    overlap = (max(r1[0],r2[0]), min(r1[1],r2[1]))
-    if overlap[0] > overlap[1]:
-        return None
-    else:
-        return overlap
-
-def coord_overlap(gene_coords):
-    ranges = chain(*gene_coords)
-    overlaps = list()
-    for span_a, span_b in combinations(ranges, 2):
-        overlap = range_overlap(span_a, span_b)
-        if overlap:
-            overlaps.append(overlap)
-    return overlaps
-
-def get_nonoverlapping_in_gene_locations(contig, gene, codingCoords):
-    overlaps = coord_overlap(codingCoords[contig].values())
-    coding_length=0
-    non_overlaps = list()
-    for region in codingCoords[contig][gene]:
-        exon_overlap = coord_overlap([[region], overlaps])
-        exon_overlap = range(exon_overlap[0][0], exon_overlap[0][1])
-        non_overlaps.append(np.array(list(set(range(region[0],region[1])).symmetric_difference(set(exon_overlap))))-(region[0]-coding_length))
-        coding_length = coding_length - region[0] + region[1]
-    return np.concatenate(non_overlaps).astype(np.int32)
-
-def one_hot_encode(ACGT_array):
-    mapping = dict(zip("ACGT", range(4)))
-    num_seq = np.vectorize(mapping.__getitem__)(ACGT_array)
-    one_hot = np.eye(4)[num_seq]
-    return one_hot
-
-def remove_overlap_regions(overlaps, mask):
-    '''given codingcoords, contig_starts, a filter and gene, return masks that will remove overlapping regions'''    
-    for gene, regions in overlaps.items():
-        for region in regions:
-            mask[:, region[0]:region[1],:] = False
-    return mask
-
-def calcPerSamplePi(sitePi, length=None, printit=None):
-    '''given numpy array of pi values, returns average per sample pi'''
-    if length is None:
-        length = sitePi.shape[1]
-    return np.nansum(sitePi,axis=1)/length
-
-def zero_out_region(regions, array):
-    '''zero out regions of array'''
-    for region in regions:
-        array[:, region[0]:region[1]] = 0
-    return array
-
-def reshape_by_codon(numpyarray):
-    '''ensures that arrays that are about to undergo
-    codon-level manipulation are in the proper shape first'''
-    if type(numpyarray) != np.ndarray:
-        numpyarray = np.array(numpyarray)
-    if len(numpyarray.shape) != 4:
-        numpyarray = numpyarray.reshape(numpyarray.shape[0],-1,3,4)
-    assert 3 in numpyarray.shape
-    return numpyarray
-
-def reshape_into_coding_frames(ref_arrays):
-    num_samps = ref_arrays.shape[0]
-    num_nucs = ref_arrays.shape[1]
-    frames = np.zeros(shape=(num_samps, num_nucs+6-(num_nucs%3), 4, 6), dtype=bool)
-    # shift coding ref seqs into the different coding frames
-    frames[:,0:num_nucs+0,:,0] = ref_arrays
-    frames[:,1:num_nucs+1,:,1] = ref_arrays
-    frames[:,2:num_nucs+2,:,2] = ref_arrays
-    frames[:,0:num_nucs+0,:,3] = ref_arrays[:,::-1,:]
-    frames[:,1:num_nucs+1,:,4] = ref_arrays[:,::-1,:]
-    frames[:,2:num_nucs+2,:,5] = ref_arrays[:,::-1,:]
-    return frames
-
-def generateSynonFilters(codingRefSeqs, synonSiteCount, nonSynonSiteCount, idx_of_var_sites_in_gene=None):
-    '''given numpy array of char sequences, return:
-       - #samples by #nucs by 7 synon filter array
-       - same thing for nonsynon filter
-       - array of synon/nonsynon counts (2 by nucs by samples)'''
-    # Recieves codingRefSeqs for just one gene
-    # for all potential codons, find indexes of all instances of codon
-    # and put relevant filter in numpy array at that index
-    # Tile for six reading frames - sample x nucpos x codon x nuc in codon x reading frame
-    
-    codingRefSeqs = reshape_into_coding_frames(codingRefSeqs)
-    # pad to ensure the refs are divisible by three
-    # codingRefSeqs = np.pad(codingRefSeqs, [(0, 0), (0, 6-codingRefSeqs.shape[1]%3), (0, 0), (0, 0)])
-    
-    codingRefSeqs = codingRefSeqs.reshape(codingRefSeqs.shape[0], -1, 3, 4, 6)
-    # Tile for six reading frames - sample x nucpos x codon x nuc in codon x reading frame
-    # codingRefSeqs = np.tile(codingRefSeqs, (1,1,1,1,6)).astype(bool).copy()
-    num_samples = codingRefSeqs.shape[0]
-    num_codons = codingRefSeqs.shape[1]
-
-    nonSynonFilter = np.zeros((num_samples, num_codons, 3, 7, 6), dtype=bool)
-    synonFilter = np.zeros((num_samples, num_codons, 3, 7, 6), dtype=bool)
-
-    nonSynonSites = np.zeros((num_samples, num_codons, 3, 4, 6), dtype=bool)
-    synonSites = np.zeros((num_samples, num_codons, 3, 4, 6), dtype=bool)
-
-    for codon in nonSynonSiteCount.keys():
-        ixs = np.asarray(np.all(codingRefSeqs==np.array(codon).reshape(1,1,3,4,1), axis=3).all(axis=2)).nonzero()
-        nonSynonFilter[ixs[0] ,ixs[1], :, :, ixs[2]] = nonSynonPiTranslate[codon][np.newaxis,:,:]
-        synonFilter[ixs[0], ixs[1], :, :, ixs[2]] = synonPiTranslate[codon][np.newaxis,:,:]
-        nonSynonSites[ixs[0], ixs[1], :, :, ixs[2]] = nonSynonSiteCount[codon][np.newaxis,:,:]
-        synonSites[ixs[0], ixs[1], :, :, ixs[2]] = synonSiteCount[codon][np.newaxis,:,:]
-
-    nonSynonFilter = nonSynonFilter.reshape(num_samples, -1, 7, 6)
-    synonFilter = synonFilter.reshape(num_samples, -1, 7, 6)
-    nonSynonSites = nonSynonSites.reshape(num_samples, -1, 4, 6)
-    synonSites = synonSites.reshape(num_samples, -1, 4, 6)
-    
-    num_const_synon_sites = 0
-    num_const_nonsynon_sites = 0
-
-    if idx_of_var_sites_in_gene is not None:
-        codingRefSeqs = codingRefSeqs.reshape(codingRefSeqs.shape[0],-1,4)
-        tmp_mask = np.ones(codingRefSeqs.shape, dtype=bool)
-        tmp_mask[:, idx_of_var_sites_in_gene, :] = False
-        num_const_nonsynon_sites = (nonSynonSites*codingRefSeqs*tmp_mask).sum(2).sum(1)
-        num_const_synon_sites = (synonSites*codingRefSeqs*tmp_mask).sum(2).sum(1)
-        nonSynonFilter = nonSynonFilter[:, idx_of_var_sites_in_gene, :]
-        synonFilter = synonFilter[:, idx_of_var_sites_in_gene, :]
-        nonSynonSites = nonSynonSites[:, idx_of_var_sites_in_gene, :]
-        synonSites = synonSites[:, idx_of_var_sites_in_gene, :]
-        return synonFilter, nonSynonFilter, synonSites, nonSynonSites, num_const_synon_sites, num_const_nonsynon_sites
-    else:
-        return synonFilter, nonSynonFilter, synonSites, nonSynonSites
-
-def get_num_sites(allRefs, read_cts):
-    '''given synon or nonsynon filter, returns
-    number of synon/nonsynon sites at each nucleotide for each sample
-    (return format: np.ndarray, 1D, numofsamples, values=number of sites in sample)'''
-    if type(allRefs) != np.ndarray:
-        allRefs = np.array(allRefs)
-    if len(allRefs.shape) != 3:
-        allRefs = codingRefSeqs.reshape(len(codingRefSeqs),-1,3)
-    assert codingRefSeqs.shape[-1] == 3
-    sites = np.sum(npfilter[:,:,1:], axis=2)/3
-
-    if overlap_to_remove:
-        overlaps = calc_overlaps(codingCoords)
-        genes = overlaps.keys()
-        if gene not in genes:
-            return np.sum(sites,axis=1)
-        ranges = overlaps[gene]
-        for start, end in ranges:
-            for start, end in ranges:
-                sites[:,start:end] = 0
-    return np.sum(sites,axis=1)
-
-def read_cts_into_SNP_freqs(read_cts, seqArray):
-    one_hot_ref = one_hot_encode(seqArray)
-    SNP_freqs = np.where(read_cts.sum(axis=2, keepdims=True)==0, one_hot_ref, read_cts)
-    SNP_freqs = SNP_freqs/SNP_freqs.sum(axis=2, keepdims=True)
-    return SNP_freqs
-
-def performPiCalc(read_cts):
-    piCalcs = np.zeros(shape=(read_cts.shape[0:2]+(7,)), dtype=np.int32)
-    piCalcs[:,:,0] = np.sum(read_cts, axis=2)
-    piCalcs[:,:,1] = read_cts[:,:,0]*read_cts[:,:,1]
-    piCalcs[:,:,2] = read_cts[:,:,0]*read_cts[:,:,2]
-    piCalcs[:,:,3] = read_cts[:,:,0]*read_cts[:,:,3]
-    piCalcs[:,:,4] = read_cts[:,:,1]*read_cts[:,:,2]
-    piCalcs[:,:,5] = read_cts[:,:,1]*read_cts[:,:,3]
-    piCalcs[:,:,6] = read_cts[:,:,2]*read_cts[:,:,3]
-    return piCalcs
-
-def calcPerSitePi(piCalcs):
-    with np.errstate(divide='ignore', invalid='ignore'):
-        result = np.sum(piCalcs[:,:,1:],axis=2)/((piCalcs[:,:,0]**2-piCalcs[:,:,0])/2)
-    return np.nan_to_num(result)
-
-def slicesFromCodingCoords(codingCoords, var_sites, genes):
-    '''overall_slices: slices concated ref into gene-specific sites
-       variable_slices: slices genome-wide var site array into gene-specific var sites
-       idx_of_var_sites: slices gene-specific ref into gene_specific variable sites'''
-    overall_slices = {gene:np.r_[tuple(np.s_[start:stop:np.sign(stop-start)] for start,stop in coords)] for gene, coords in genes.items()}
-    variable_slices = {gene: np.where([p in s for p in var_sites])[0][::np.sign(s[-1]-s[0])] for gene, s in overall_slices.items()}
-    idx_of_var_sites = {gene: np.where([p in var_sites for p in s])[0] for gene, s in overall_slices.items()}
-    return overall_slices, variable_slices, idx_of_var_sites
-
-
-def getRefSeqs(read_cts, ref_seq_array, var_index):
-    '''given dataframe of VCF with variable sites and numpy refseq array,
-    returns numpy array of refseqs with sample key'''
-    all_ref_seqs = np.tile(ref_seq_array, (read_cts.shape[0], 1, 1)).astype(bool).copy()
-    var_ref_seqs = read_cts==(read_cts.max(2, keepdims=True))
-    all_ref_seqs[:, var_index, :] = var_ref_seqs
-    return all_ref_seqs
-
-maf = 0.01; mutation_rates = None; rollingWindow=None; synon_nonsynon=False; ignore_stop_codons=False;binsize=1e6
-
-def calcPi(vcf_file, ref_fasta, gtf_file=None, maf = 0.01, mutation_rates = None, 
-           rollingWindow=None, synon_nonsynon=False, ignore_stop_codons=False,
-           binsize=1e6):
-    # Main body of program
+#@profile
+def calcPi(vcf_file, ref_fasta, gtf_file=None, maf=0.01, mutation_rates=None,
+           rolling_window=None, pi_only=True, include_stop_codons=False,
+           binsize=int(1e6), num_processes=1):
     print ("Welcome to PiMaker!")
     if mutation_rates:
         mutation_rates = read_mutation_rates(mutation_rates)
 
-    num_sites_dict = make_num_sites_dict(mutation_rates, ignore_stop_codons)
-    synon_cts = make_synon_nonsynon_site_dict(num_sites_dict, ignore_stop_codons)
-    print(f'Loading reference sequence from {ref_fasta}...')
+    num_sites_dict = make_num_sites_dict(mutation_rates, include_stop_codons)
+    synon_cts = make_synon_nonsynon_site_dict(num_sites_dict, include_stop_codons)
+
+    print (f'Loading reference sequence from {ref_fasta}...')
     ref_array, contig_starts, contig_coords = create_combined_reference_Array(ref_fasta)
-    print(f'Loading annotation information from {gtf_file}...')
+    print (f'Loading annotation information from {gtf_file}...')
     gene_coords, transcript_to_gene_id, id_to_symbol = parseGTF(gtf_file, contig_starts)
 
     sample_list = get_sample_list(vcf_file)
     num_var = get_num_var(vcf_file)
 
-    overall_sample_pi_columns = list(['sample_id','contig','chunk_id','chunk_len', 'stat_name', 'stat'])
-    site_sample_pi_columns =    list()
-    gene_sample_pi_columns =    list(['sample_id','contig','chunk_id', 'gene_id','gene_symbol', 'transcript_id',
-                                        'transcript', 'transcript_len', 'pi', 'piN', 'piS', 'N_sites', 'S_sites',
-                                        'piN_no_overlap', 'piS_no_overlap','N_sites_no_overlap', 'S_sites_no_overlap']) # sample_ids x context + all per gene stats (slightly different; not quite longform)
+    overall_sample_pi_columns = list(['sample_id', 'contig', 'chunk_id', 'chunk_len', 'stat_name', 'stat'])
+    site_sample_pi_columns =    tuple(['sample_id', 'contig', 'stat_name'])
+    gene_sample_pi_columns =    list(['sample_id', 'contig', 'chunk_id', 'transcript_id', 'transcript', 'gene_id', 'gene_symbol',
+                                        'transcript_len', 'transcript_len_no_overlap', 'pi', 'piN', 'piS', 'N_sites', 'S_sites',
+                                        'pi_no_overlap', 'piN_no_overlap', 'piS_no_overlap', 'N_sites_no_overlap', 'S_sites_no_overlap'])
+                                        # sample_ids x context + all per gene stats (slightly different; not quite longform)
     overall_sample_pi = list()
     gene_sample_pi = list()
-    site_sample_pi = {contig:{sample_id: list() for sample_id in sample_list} for contig in contig_starts.keys()}
+    site_sample_pi = {contig: None for contig in contig_starts.keys()}
 
-    ##TODO: add MAF functionality
-    ##TODO: How do I speed this up?? Grr.
-    record_iterator = iterate_records(vcf_file, ref_array, contig_coords, gene_coords, num_var=num_var, binsize=int(binsize))
+    chunk_result_holder = list()
 
-    for chunk_id, (read_cts, var_pos, genes, ref_array_chunk, bin_start, bin_end, contig) in enumerate(record_iterator):
-        if contig != '2L':
-            break
+    chunk_queue = mp.Queue()
+    results_queue = mp.Queue()
+    tqdm_lock = tqdm.get_lock()
+    
+    iterator_args = vcf_file, ref_array, contig_coords, gene_coords, chunk_queue, results_queue, tqdm_lock
+    iterator_kwargs = {'num_var': num_var, 'num_processes': num_processes, 'binsize': binsize, 'maf': maf}
+    iterator_process = mp.Process(target=mp_iterate_records, args=iterator_args, kwargs=iterator_kwargs)
+    iterator_process.start()
+    # x = mp_iterate_records(*iterator_args, **iterator_kwargs)
+    chunk_args = (chunk_queue, results_queue, sample_list, contig_coords, id_to_symbol, transcript_to_gene_id, synon_cts, tqdm_lock)
+    # process_chunk(*chunk_args)
+    executors = [mp.Process(target=process_chunk, args=chunk_args + (i,)) for i in range(num_processes)]
+    for executor in executors:
+        executor.start()
 
-        # Create lists to track results in this chunk:
-        chunk_sample_pi, chunk_gene_pi, chunk_site_pi = list(), list(), list()
-        # The number of columns in the gene data is unwieldly to do anything but a numpy array that I fill in
-        site_sample_pi_columns.extend([var_site-contig_coords[contig][0] for var_site in var_pos])
-        chunk_len = bin_end - bin_start
-        basic_data = (contig, chunk_id, chunk_len)
+    none_tracker = 0
+    while True:
+        result = results_queue.get()
+        if result is None:
+            none_tracker += 1
+            if none_tracker == num_processes:
+                break
+        else:
+            chunk_result_holder.append(result)
 
-        print(f'Calculating Pi...')
-        piMath = performPiCalc(read_cts)
-        freq_cts = read_cts.astype(np.float32)/read_cts.sum(2, keepdims=True).astype(np.float32)
-        freq_cts = np.nan_to_num(freq_cts)
-
-        chunk_per_site_pi = calcPerSitePi(piMath)
-        chunk_per_sample_pi = calcPerSamplePi(chunk_per_site_pi, length=(bin_end-bin_start))
-
-        # chunk_per_site_pi_df = pd.DataFrame(chunk_per_site_pi, index=sample_list).dropna(how='all',axis=1)
-        # chunk_per_sample_pi_df = pd.DataFrame(chunk_per_sample_pi, index=sample_list, columns=['pi_sample'])
-        # chunk_per_site_pi_df['contig'] = contig
-        # chunk_per_sample_pi_df['contig'] = contig
-        # chunk_per_sample_pi_df['chunk_len'] = (bin_end-bin_start)
-
-        # before processing gene results, record pi data
-        for sample_id, chunk_pi_vals in zip(sample_list, chunk_per_site_pi):
-            site_sample_pi[contig][sample_id].extend(chunk_pi_vals)
-        chunk_sample_pi.extend([(sample_id,) + basic_data+('pi',) + tuple((pi,)) for sample_id, pi in zip(sample_list, chunk_per_sample_pi)])
-        #contig Pi
-        # perContigPiDF = pd.DataFrame(index=sample_list)
-
-        # for contig, coords in contig_coords.items():
-        #     perContigPiDF[contig] = pd.Series(calcPerSamplePi(chunk_per_site_pi[:,coords[0]:coords[1]], length = coords[1]-coords[0]), index=sample_list)
-        # perContigPiDF = perContigPiDF.stack().reset_index().rename(columns={'level_0':'sampleID','level_1':'contig',0:'pi_contig'})
-
-        # Now calculate coding regions' Pi/PiN/PiS
-        ##TODO: This step takes a surprising amount of time
-        gene_slices, gene_var_slices, idx_of_var_sites = slicesFromCodingCoords(contig_starts, var_pos, genes)
-        # [k for k in gene_coords['2L'].keys() if k in genes.keys()]
-        #question: I have the idx of nucleotides that are in genes, and I have the idx of concated nucleotide 
-        overlapping_out_of_frame_idx = calc_overlaps_and_reading_frames(genes, gene_slices, bin_start, bin_end)
-        refSeqArrays = getRefSeqs(read_cts, ref_array_chunk, var_pos)
-        break
-    break
-        synon_filters = generateSynonFilters(refSeqArrays, *synon_cts)
-        synonFilter, nonSynonFilter, synonSites, nonSynonSites = synon_filters
-            
-
-        nonsynon_sites = (freq_cts*nonSynonSiteFilter).sum(axis=2)
-        synon_sites = (freq_cts*synonSiteFilter).sum(axis=2)
-        chunk_gene_pi_vals = np.empty(shape=(9, len(sample_list)))
-        chunk_gene_pi_vals[:] = np.nan
-        # piMathMaskedArray = np.ma.array(piMath, mask=np.broadcast_to(abs(mask-1)[np.newaxis,:,np.newaxis], piMath.shape))
-        # genePiMathArray = piMathMaskedArray.compressed().reshape(synonFilter.shape)
-        nonSynonPerSitePi = calcPerSitePi(piMath*nonSynonFilter)
-        synonPerSitePi =    calcPerSitePi(piMath*synonFilter)
-
-        # print('Calculating PiN and PiS for each gene...')
-        #create slices per gene, and pin/pis masks per gene
-        ##TODO This is also taking a long time! Maybe I should do this calc one for all reading frames,
-        ##TODO Then slice accordingly
-
-        for gene, gene_slice in tqdm(gene_slices.items(), position=1): #if already looping through genes/masks, 
-            # geneSeqMaskedArray = np.ma.array(refSeqArrays, mask=np.broadcast_to(abs(mask-1), refSeqArrays.shape))
-            # geneSeqArray = geneSeqMaskedArray.compressed().reshape(len(sample_list),-1)
-            # gene_pi_per_sample = pd.DataFrame(index=sample_list)
-            # gene_pi_per_sample['contig'] = contig
-            # gene_pi_per_sample['transcript'] = gene
-            # gene_pi_per_sample['gene_id'] = transcript_to_gene_id[gene]
-            # gene_pi_per_sample['gene_symbol'] = id_to_symbol[gene]
-            # gene_pis = dict()
-            # gene_pis['contig'] = contig
-            # gene_pis['transcript'] = gene
-            # gene_pis['gene_id'] = transcript_to_gene_id[gene]
-            # gene_pis['gene_symbol'] = id_to_symbol[gene]
-            # gene_pis['transcript_len'] = len(gene_slice)
-
-            basic_gene_data = (contig, chunk_id, gene, id_to_symbol[gene], transcript_to_gene_id[gene],
-                                id_to_symbol[transcript_to_gene_id[gene]], len(gene_slice))
-            gene_var_slice = gene_var_slices[gene]
-            muts_in_gene = idx_of_var_sites[gene]
-
-            # Indexing notes:
-            # gene_slice: index of gene sites in chunk
-            # gene_var_slice: index of gene's mutable sites in list of mutable sites
-            # muts_in_gene: index of gene's mutable sites in gene slice
-            # so gene_slice[muts_in_gene] should equal var_pos[gene_var_slice] - it does
-            # var_pos[gene_var_slice] - min(gene_slice) = in-gene-slice indexes of mutable sites
-            # read_cts: whole chunk
-            # refseqArray: whole chunk
-            # var_pos: index of all mutable sites in chunk
-            try:
-                refSeqArrays = getRefSeqs(read_cts[:,gene_var_slice,:], ref_array_chunk[:,gene_slice,:], muts_in_gene)
-            except Exception as x:
-                print(gene)
-                print(x)
-                # return read_cts, gene_var_slice, ref_array, gene_slice, var_pos, muts_in_gene
-            synon_filters = generateSynonFilters(refSeqArrays, *synon_cts, idx_of_var_sites_in_gene=muts_in_gene)
-            synonFilter, nonSynonFilter, synonSiteFilter, nonSynonSiteFilter, num_const_synon_sites, num_const_nonsynon_sites = synon_filters
-
-            # gene_read_cts = read_cts[:,:,gene_var_slice]
-            # gene_read_cts = np.ma.array(read_cts, mask=np.broadcast_to(abs(mask-1)[np.newaxis,:,np.newaxis], read_cts.shape))
-            # gene_read_cts = gene_read_cts.compressed().reshape(synonSiteFilter.shape)
-
-            SNP_freqs = freq_cts[:, gene_var_slice, :]
-            # remove start codon from math if requested
-            # if ignore_stop_codons:
-            #     nonSynonSiteFilter[:,0:3,:] = 1
-            #     synonSiteFilter[:,0:3,:] = 0
-
-            nonsynon_sites = (SNP_freqs*nonSynonSiteFilter).sum(axis=2)
-            synon_sites = (SNP_freqs*synonSiteFilter).sum(axis=2)
-
-            # The number of columns to keep track of here is large, so I will fill in a numpy array to keep everything straight.
-            # cols to fill in are: 'pi', 'piN', 'piS', 'N_sites', 'S_sites', 'piN_no_overlap', 'piS_no_overlap','N_sites_no_overlap', 'S_sites_no_overlap'
-            chunk_gene_pi_vals = np.empty(shape=(9, len(sample_list)))
-            chunk_gene_pi_vals[:] = np.nan
-            # piMathMaskedArray = np.ma.array(piMath, mask=np.broadcast_to(abs(mask-1)[np.newaxis,:,np.newaxis], piMath.shape))
-            # genePiMathArray = piMathMaskedArray.compressed().reshape(synonFilter.shape)
-            genePiMathArray =   piMath[:,gene_var_slice,:]
-            genePerSitePi =     calcPerSitePi(genePiMathArray)
-            nonSynonPerSitePi = calcPerSitePi(genePiMathArray*nonSynonFilter)
-            synonPerSitePi =    calcPerSitePi(genePiMathArray*synonFilter)
-            chunk_gene_pi_vals[0] = calcPerSamplePi(genePerSitePi, length=len(gene_slice))
-            chunk_gene_pi_vals[1] = calcPerSamplePi(nonSynonPerSitePi, length=nonsynon_sites.sum(axis=1)+num_const_nonsynon_sites)
-            chunk_gene_pi_vals[2] = calcPerSamplePi(synonPerSitePi, length=synon_sites.sum(axis=1)+num_const_synon_sites)
-            chunk_gene_pi_vals[3] = nonsynon_sites.sum(axis=1) + num_const_nonsynon_sites
-            chunk_gene_pi_vals[4] = synon_sites.sum(axis=1) + num_const_synon_sites
-            # print(gene, genePiN[gene])
-            #And now do the same thing w/o overlapping regions to accurately determine whole-sample piN/piS
-
-# I could create six synon/nonsynon filters, or one per reading frame.
-# Concat them into one sample x chunklen x readframe filter
-# because exons can shift read frames, I could then 
-            if gene in overlapping_out_of_frame_idx.keys():
-                # overlap_ix = set().union(*[set(range(start,end)) for start,end in overlaps[gene]])
-                overlap_ix = overlapping_out_of_frame_idx[gene]
-                # np.in1d(gene_slice, overlap_ix)[muts_in_gene] is the parts of the gene that are mutable and in the overlap_ix.
-                # ~that indicates we want the mutable sites that *aren't* in that list.
-                remove_overlap_sites = ~np.in1d(gene_slice, overlap_ix)[muts_in_gene]
-
-                synonFilter_no_overlap = synonFilter[:,remove_overlap_sites,:]
-                nonSynonFilter_no_overlap = nonSynonFilter[:,remove_overlap_sites,:]
-
-                sample_gene_N_sites_no_overlap = synon_sites[:, remove_overlap_sites].sum(axis=1)
-                sample_gene_S_sites_no_overlap = nonsynon_sites[:, remove_overlap_sites].sum(axis=1)
-                nonSynonPerSitePi_no_overlap = calcPerSitePi(genePiMathArray[:,remove_overlap_sites,:]*nonSynonFilter_no_overlap)
-                synonPerSitePi_no_overlap = calcPerSitePi(genePiMathArray[:,remove_overlap_sites,:]*synonFilter_no_overlap)
-
-                chunk_gene_pi_vals[5] = calcPerSamplePi(nonSynonPerSitePi_no_overlap, length=sample_gene_S_sites_no_overlap)
-                chunk_gene_pi_vals[6] = calcPerSamplePi(synonPerSitePi_no_overlap, length=sample_gene_N_sites_no_overlap)
-                chunk_gene_pi_vals[7] = sample_gene_N_sites_no_overlap
-                chunk_gene_pi_vals[8] = sample_gene_S_sites_no_overlap
-            else:
-                # data with no overlaps is identical to data w/ overlaps
-                chunk_gene_pi_vals[5:9] = chunk_gene_pi_vals[1:5]
-
-            #Finally, append this gene's data to the collection of gene data for this chunk
-            chunk_gene_pi.extend([(sample_id,)+basic_gene_data+tuple(data)
-                                    for sample_id, data, in zip(sample_list, chunk_gene_pi_vals.T)])
-        #Finally finally, add chunk results to list of overall results
+    for contig, chunk_sample_pi, chunk_gene_pi, chunk_site_pi, var_site_positions in chunk_result_holder:
         overall_sample_pi.extend(chunk_sample_pi)
         gene_sample_pi.extend(chunk_gene_pi)
-        site_sample_pi[contig] = {sample:site_sample_pi[contig][sample]+list(data) for sample, data in zip(sample_list, chunk_per_site_pi)}
+        # for site_pis only, make the dataframe and stitch chunks here
+        site_pi_df = pd.DataFrame(chunk_site_pi, columns=(site_sample_pi_columns + tuple(var_site_positions)))
+        if site_sample_pi[contig] is None:
+            site_sample_pi[contig] = site_pi_df
+        else:
+            site_sample_pi[contig] = site_sample_pi[contig].merge(site_pi_df, on=['sample_id', 'contig', 'stat_name'])
 
     # Once all chunks have been processed, assemble chunks together
-    pi_per_sample_df = pd.DataFrame(overall_sample_pi, columns = overall_sample_pi_columns)
-    pi_per_gene_df = pd.DataFrame(gene_sample_pi, columns = gene_sample_pi_columns)
-
-    # This is just an ugly way to do this, but the obvious, simple method of organizing this is escaping me right now
-    # pi_per_site_dfs = dict of dfs, one per contig, with all sites
-    pi_per_site_dfs = dict()
-    for contig in site_sample_pi.keys():
-        pi_per_site_dfs[contig] = pd.DataFrame().from_dict(site_sample_pi[contig], orient='index', columns = site_sample_pi_columns)
+    pi_per_sample_df = pd.DataFrame(overall_sample_pi, columns=overall_sample_pi_columns)
+    pi_per_gene_df = pd.DataFrame(gene_sample_pi, columns=gene_sample_pi_columns)
 
     # Stitch together chunks using groupby - note that both per_site stats and per_gene stats are, by their nature, not subject to stat 'splitting' from 
     pi_per_sample_df = pi_per_sample_df.groupby(['sample_id', 'stat_name']).apply(lambda x: np.average(x.stat, weights=x.chunk_len))
-    pi_per_sample_df['piN'] = pi_per_gene_df.groupby(['sample_id']).apply(lambda x: np.average(x.piN, weights=x.N_sites)).values
-    pi_per_sample_df['piS'] = pi_per_gene_df.groupby(['sample_id']).apply(lambda x: np.average(x.piS, weights=x.S_sites)).values
-    pi_per_sample_df['N_sites'] = pi_per_gene_df.groupby(['sample_id']).apply(lambda x: np.sum(x.N_sites)).values
-    pi_per_sample_df['S_sites'] = pi_per_gene_df.groupby(['sample_id']).apply(lambda x: np.sum(x.S_sites)).values
+    pi_per_sample_df['piN'] = pi_per_gene_df.groupby(['gene_id', 'sample_id']).first().groupby(['sample_id']).apply(lambda x: np.average(x.piN_no_overlap, weights=x.N_sites_no_overlap)).values
+    pi_per_sample_df['piS'] = pi_per_gene_df.groupby(['gene_id', 'sample_id']).first().groupby(['sample_id']).apply(lambda x: np.average(x.piS_no_overlap, weights=x.S_sites_no_overlap)).values
+    pi_per_sample_df['N_sites'] = pi_per_gene_df.groupby(['gene_id', 'sample_id']).first().groupby(['sample_id']).apply(lambda x: np.sum(x.N_sites_no_overlap)).values
+    pi_per_sample_df['S_sites'] = pi_per_gene_df.groupby(['gene_id', 'sample_id']).first().groupby(['sample_id']).apply(lambda x: np.sum(x.S_sites_no_overlap)).values
 
-    pi_per_contig_df = pi_per_gene_df.groupby(['contig','sample_id']).apply(lambda x: np.average(x.piN, weights=x.N_sites)).reset_index().rename(columns={0:'piN'})
-    # pi_per_contig_df['piN'] = pi_per_gene_df.groupby(['contig','sample_id']).apply(lambda x: np.average(x.piN, weights=x.N_sites)).reset_index()
-    pi_per_contig_df['piS'] = pi_per_gene_df.groupby(['contig','sample_id']).apply(lambda x: np.average(x.piS, weights=x.S_sites)).values
-    pi_per_contig_df['N_sites'] = pi_per_gene_df.groupby(['contig','sample_id']).apply(lambda x: np.sum(x.N_sites)).values
-    pi_per_contig_df['S_sites'] = pi_per_gene_df.groupby(['contig','sample_id']).apply(lambda x: np.sum(x.S_sites)).values
-    pi_per_contig_df['pi'] = np.nan
-    for contig in pi_per_site_dfs.keys():
-        pi_per_contig_df.loc[pi_per_contig_df.contig==contig, 'pi'] = (pi_per_site_dfs[contig].sum(1)/(contig_coords[contig][1]-contig_coords[contig][0])).values
-    
-    return pi_per_sample_df, pi_per_contig_df, pi_per_gene_df, pi_per_site_df
+    contig_lengths = {contig: (contig_coords[contig][1] - contig_coords[contig][0]) for contig in contig_coords.keys()}  # pi_per_sample_df.groupby(['contig', 'chunk_id']).first().groupby('contig').sum()['chunk_len'].to_dict()
+    contig_pi = site_sample_pi[contig].iloc[:, 5:].sum(1)/contig_lengths[contig]
+    sample_contig_stats = [{'sample_id': sample_id, 'contig': contig, 'contig_length': contig_lengths[contig], 'pi': pi} for sample_id, pi in zip(sample_list, contig_pi) for contig in site_sample_pi.keys() if site_sample_pi[contig] is not None]
+    pi_per_contig_df = pd.DataFrame(sample_contig_stats)
+    pi_per_contig_df['piN'] = pi_per_gene_df.groupby(['gene_id', 'sample_id']).first().groupby(['contig', 'sample_id']).apply(lambda x: np.average(x.piN_no_overlap, weights=x.N_sites_no_overlap)).values
+    pi_per_contig_df['piS'] = pi_per_gene_df.groupby(['gene_id', 'sample_id']).first().groupby(['contig', 'sample_id']).apply(lambda x: np.average(x.piS_no_overlap, weights=x.S_sites_no_overlap)).values
+    pi_per_contig_df['N_sites'] = pi_per_gene_df.groupby(['gene_id', 'sample_id']).first().groupby(['contig', 'sample_id']).apply(lambda x: np.sum(x.N_sites_no_overlap)).values
+    pi_per_contig_df['S_sites'] = pi_per_gene_df.groupby(['gene_id', 'sample_id']).first().groupby(['contig', 'sample_id']).apply(lambda x: np.sum(x.S_sites_no_overlap)).values
 
 
-from tqdm import trange, tqdm
-from collections import OrderedDict
-import pysam
+    # for chunk_id, (read_cts, var_pos, genes, bin_start, bin_end, contig) in enumerate(record_iterator):
+    #     if contig != '2L':
+    #         break
+    #     # Create lists to track results in this chunk:
+    #     chunk_sample_pi, chunk_gene_pi, chunk_site_pi = list(), list(), list()
+    #     # The number of columns in the gene data is unwieldly to do anything but a numpy array that I fill in
+    #     site_sample_pi_columns.extend([var_site-contig_coords[contig][0] for var_site in var_pos])
+    #     chunk_len = bin_end - bin_start
+    #     basic_data = (contig, chunk_id, chunk_len)
 
-vcf_file = '/mnt/d/projects/pimaker/test_data/drosophilia/dest.PoolSeq.PoolSNP.001.50.10Nov2020.ann.vcf.gz'
-ref_fasta = '/mnt/d/projects/pimaker/test_data/drosophilia/dmel-all-chromosome-r6.12.fasta.gz'
-gtf_file = '/mnt/d/projects/pimaker/test_data/drosophilia/dmel-all-r6.12.gtf.gz'
+    #     print(f'Calculating Pi...')
+    #     piMath = performPiCalc(read_cts)
+    #     with np.errstate(divide='ignore', invalid='ignore'):
+    #         freq_cts = read_cts.astype(np.float32)/read_cts.sum(2, keepdims=True).astype(np.float32)
+    #         freq_cts = np.nan_to_num(freq_cts)
+
+    #     chunk_per_site_pi = calcPerSitePi(piMath)
+    #     chunk_per_sample_pi = calcPerSamplePi(chunk_per_site_pi, length=(bin_end-bin_start))
+
+    #     # chunk_per_site_pi_df = pd.DataFrame(chunk_per_site_pi, index=sample_list).dropna(how='all',axis=1)
+    #     # chunk_per_sample_pi_df = pd.DataFrame(chunk_per_sample_pi, index=sample_list, columns=['pi_sample'])
+    #     # chunk_per_site_pi_df['contig'] = contig
+    #     # chunk_per_sample_pi_df['contig'] = contig
+    #     # chunk_per_sample_pi_df['chunk_len'] = (bin_end-bin_start)
+
+    #     # before processing gene results, record pi data
+    #     for sample_id, chunk_pi_vals in zip(sample_list, chunk_per_site_pi):
+    #         site_sample_pi[contig][sample_id].extend(chunk_pi_vals)
+    #     chunk_sample_pi.extend([(sample_id,) + basic_data+('pi',) + tuple((pi,)) for sample_id, pi in zip(sample_list, chunk_per_sample_pi)])
+    #     #contig Pi
+    #     # perContigPiDF = pd.DataFrame(index=sample_list)
+
+    #     # for contig, coords in contig_coords.items():
+    #     #     perContigPiDF[contig] = pd.Series(calcPerSamplePi(chunk_per_site_pi[:,coords[0]:coords[1]], length = coords[1]-coords[0]), index=sample_list)
+    #     # perContigPiDF = perContigPiDF.stack().reset_index().rename(columns={'level_0':'sampleID','level_1':'contig',0:'pi_contig'})
+
+    #     # Now calculate coding regions' Pi/PiN/PiS
+    #     ##TODO: This step takes a surprising amount of time
+    #     gene_slices, gene_var_slices, idx_of_var_sites = coordinates_to_slices(contig_starts, var_pos, genes)
+    #     #question: I have the idx of nucleotides that are in genes, and I have the idx of concated nucleotide 
+    #     overlapping_out_of_frame_idx = calc_overlaps(gene_slices, genes, bin_start, bin_end)
+
+    #     # print('Calculating PiN and PiS for each gene...')
+    #     #create slices per gene, and pin/pis masks per gene
+    #     for i, (gene, gene_slice) in enumerate(tqdm(gene_slices.items(), position=1)): #if already looping through genes/masks, 
+    #         basic_gene_data = (contig, chunk_id, gene, id_to_symbol[gene], transcript_to_gene_id[gene],
+    #                             id_to_symbol[transcript_to_gene_id[gene]], len(gene_slice))
+    #         gene_var_slice = gene_var_slices[gene]
+    #         muts_in_gene = idx_of_var_sites[gene]
+    #         gene_args = read_cts[:,gene_var_slice,:], ref_array[:,gene_slice,:], muts_in_gene, synon_cts, freq_cts[:, gene_var_slice, :], piMath[:,gene_var_slice,:], sample_list, overlapping_out_of_frame_idx, gene, gene_slice, basic_gene_data
+    #         chunk_gene_pi.extend(process_gene(*gene_args))
+
+    #     #Finally finally, add chunk results to list of overall results
+    #     overall_sample_pi.extend(chunk_sample_pi)
+    #     gene_sample_pi.extend(chunk_gene_pi)
+    #     site_sample_pi[contig] = {sample:site_sample_pi[contig][sample]+list(data) for sample, data in zip(sample_list, chunk_per_site_pi)}
+    #     break
+    # profile.print_stats()
+    # return 'Done'
+    return pi_per_sample_df, pi_per_contig_df, pi_per_gene_df, site_sample_pi
 
 
 
-def get_sample_list(vcf_file):
-    vcf = pysam.VariantFile(vcf_file, threads = os.cpu_count()/2)
-    test_record = next(vcf)
-    sample_list = list(test_record.samples.keys())
-    return sample_list
-
-def iterate_records(vcf_file, ref_array, contig_coords, gene_coords, num_var=None, binsize=int(1e6)):
-    '''yield chunk coordinates, mutations, genes, and gene_coordinates, ref_array chunk'''
-    #create cache folder
+# def iterate_records(vcf_file, ref_array, contig_coords, gene_coords, num_var=None, binsize=int(1e6)):
+#     '''yield chunk coordinates, mutations, genes, and gene_coordinates, ref_array chunk'''
+#     #create cache folder
     if not os.path.isdir('chunk_cache'):
         os.mkdir('chunk_cache')
     vcf = pysam.VariantFile(vcf_file, threads = os.cpu_count()/2)
@@ -548,97 +200,31 @@ def iterate_records(vcf_file, ref_array, contig_coords, gene_coords, num_var=Non
     progress = 0
     bin_start = 0
     bin_end = 0
-    for contig, (contig_start, contig_end) in contig_coords.items():
-        # x = np.array([x[-1][-1] for x in gene_coords['2L'].values()])
-        # bins = np.digitize(x, np.arange(0, x.max(), binsize))
-        bin_end = 0
-        for i in trange(int((contig_end-contig_start)//binsize), total=int(num_var//binsize)):
-            bin_start = i*binsize
-            bin_end = np.min((binsize*(i+1)+contig_start, contig_end))
-            genes, bin_end = retrieve_genes_in_region(bin_start, bin_end, gene_coords[contig])
-            muts = vcf.fetch(contig=contig, start=bin_start, end=bin_end)
+#     for contig, (contig_start, contig_end) in contig_coords.items():
+#         # x = np.array([x[-1][-1] for x in gene_coords['2L'].values()])
+#         # bins = np.digitize(x, np.arange(0, x.max(), binsize))
+#         bin_end = 0
+#         for i in trange(int((contig_end-contig_start)//binsize), total=int(num_var//binsize)):
+#             bin_start = i*binsize
+#             bin_end = np.min((binsize*(i+1)+contig_start, contig_end))
+#             genes, bin_end = retrieve_genes_in_region(bin_start, bin_end, gene_coords[contig])
+#             muts = vcf.fetch(contig=contig, start=bin_start, end=bin_end)
 
-            #loac read_cts and var_pos from cache if available, since this takes so long
-            cache_base_name = f'chunk_cache/{contig}_{bin_start}_{bin_end}'
-            if os.path.exists(f'{cache_base_name}_read_cts.npy'):
-                read_cts = np.load(f'{cache_base_name}_read_cts.npy')
-                var_pos = np.load(f'{cache_base_name}_var_pos.npy')
-            else:
-                read_cts, var_pos = format_mut_array(muts, len(sample_list), bin_end-bin_start, contig_coords)
-                np.save(f'{cache_base_name}_read_cts.npy', read_cts)
-                np.save(f'{cache_base_name}_var_pos.npy', var_pos)
+#             #loac read_cts and var_pos from cache if available, since this takes so long
+#             cache_base_name = f'chunk_cache/{contig}_{bin_start}_{bin_end}'
+#             if os.path.exists(f'{cache_base_name}_read_cts.npy'):
+#                 read_cts = np.load(f'{cache_base_name}_read_cts.npy')
+#                 var_pos = np.load(f'{cache_base_name}_var_pos.npy')
+#             else:
+#                 read_cts, var_pos = format_mut_array(muts, len(sample_list), bin_end-bin_start, contig_coords)
+#                 np.save(f'{cache_base_name}_read_cts.npy', read_cts)
+#                 np.save(f'{cache_base_name}_var_pos.npy', var_pos)
             
-            # How to I keep track of start, bin_end?
-            # How to I update w/ each new contig?
-            # Should I yield mut_array and start,end to slice ref_array later? - No, yield relevent genes and gene_coords, use those to slice ref array
-            yield read_cts, var_pos, genes, ref_array[:, bin_start:bin_end, :], bin_start, bin_end, contig
-
-def retrieve_genes_in_region(start, stop, gene_coords):
-    '''record genes present in region.
-       while recording, if pos is in middle of gene, adjust it'''
-    genes = OrderedDict()
-    for gene, coords in gene_coords.items():
-        gene_start = coords[0][0]
-        gene_end = coords[-1][-1]
-        if gene_start > stop: # if gene begins after region, stop iteration.
-            break
-        elif gene_start >= start: # if gene begins after start of region and before end of region, record gene
-            genes[gene] = coords
-            if gene_end >= stop: # if the gene begins within region but ends after region, adjust end of region.
-                stop = gene_end+1
-    return genes, stop
-
-def format_mut_array(muts, num_samples, chunklen, contig_coords):
-    '''given iterator of pysam muts in a region,
-       return array of read counts'''
-    num_records = 0
-    # I don't have a great way of determining the number of mutations in a chunk
-    read_cts = np.zeros((num_samples, chunklen, 4),dtype=np.uint16)
-    var_pos = np.zeros(chunklen, dtype=np.uint64)
-    i = 0
-    for r in tqdm(muts, position=1):
-        if is_snp(r):
-            var_pos[i] = r.pos + contig_coords[r.contig][0]
-            nucs = ((r.ref,) + tuple(a for a in r.alts if len(a)==1 and a is not None))
-            one_hots = np.array(list(tuple_dict[n] for n in nucs), dtype=np.uint16)
-            try:
-                read_cts[:,i,:] = np.stack([format_sample_cts(s, one_hots) for s in r.samples.values()])
-            except Exception as e:
-                print (e)
-                return r, i, read_cts
-            i += 1
-    return read_cts[:, :i, :], var_pos[:i]
-
-def format_sample_cts(s, one_hots):
-    if s['RD'] is None:
-        return np.zeros(4, dtype=np.uint16)
-    else:
-        alleles = s.allele_indices
-        cts = np.array((s['RD'],) + s['AD'], dtype=np.uint16)[:, np.newaxis]
-        if alleles[0] == alleles[1]: # if monoallelic
-            alleles = alleles[0:1]
-            cts = cts[alleles[0]:alleles[0]+1,:]
-        elif alleles[0] != 0:
-            alleles = (0,)+alleles
-        s_hots = one_hots[alleles,:]
-        return (cts*s_hots).sum(0)
-
-def is_monoallelic(alleles):
-    return alleles[0] == alleles[1]
-
-def is_snp(r):
-    '''determines if a pysam variant record is a snp or not'''
-    return (len(r.ref) == 1) and any([len(a)==1 for a in r.alts]) and (r.ref is not None)
-
-def create_allele_idx_to_nuc_idx_dict():
-    possible_keys = chain.from_iterable([permutations('ACGT', r) for r in range(2, len(s)+1)])
-    return {k:tuple('ACGT'.index(i) for i in k) for k in possible_keys}
+#             # How to I keep track of start, bin_end?
+#             # How to I update w/ each new contig?
+#             # Should I yield mut_array and start,end to slice ref_array later? - No, yield relevent genes and gene_coords, use those to slice ref array
+#             yield read_cts, var_pos, genes, bin_start, bin_end, contig
 
 
-def determine_read_frame(chrm_ref_idx, start, end):
-    '''read frame notation: 0,1,2 = fwd1, fwd2, fwd3
-                            3,4,5 = rev1, rev2, rev3'''
-    fwd_rev_adjust = 0
-    if np.sign(end-start) < 0:
-        fwd_rev_adjust = 3
-    return (start-chrm_ref_idx)%3+fwd_rev_adjust
+# if __name__ == '__main__':
+#     main()
