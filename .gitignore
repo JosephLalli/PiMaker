@@ -21,3 +21,13 @@ misc.note
 .gitignore
 pimaker-env
 misc.txt
+.fasta
+A_Singapore_INFIMH-16-0019_2016_HA.fasta
+A_Singapore_INFIMH-16-0019_2016_MP.fasta
+A_Singapore_INFIMH-16-0019_2016_NA.fasta
+A_Singapore_INFIMH-16-0019_2016_NP.fasta
+A_Singapore_INFIMH-16-0019_2016_NS.fasta
+A_Singapore_INFIMH-16-0019_2016_PA.fasta
+A_Singapore_INFIMH-16-0019_2016_PB1.fasta
+A_Singapore_INFIMH-16-0019_2016_PB2.fasta
+chr3.gtf

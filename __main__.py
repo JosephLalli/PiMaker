@@ -1,15 +1,11 @@
-# vcf_file, ref_fasta, gtf_file=None, maf=0.01, mutation_rates=None, 
-#            rollingWindow=None, synon_nonsynon=False, include_stop_codons=False,
-#            binsize=int(1e6), num_processes=1
-
 import argparse
 import shutil
-import os, sys
+import os
+import sys
 from version import __version__
 
 
 def get_parser():
-    # determine command line arguments and get path
     parser = argparse.ArgumentParser(description='Tool to calculate diversity statistics from sequenced populations.',
                                      formatter_class=MyHelpFormatter, add_help=False)
     parser.add_argument('--version', action='version', version=f'Pimaker {__version__}',
@@ -23,7 +19,7 @@ def get_parser():
     parser.add_argument('-g', '--gtf',required=True, type=str,
                         help='''GTF file containing locations of all genes and transcripts of interest in the
                                 reference fasta file''')
-    parser.add_argument('-o', '--output',required=True, type=str, default = 'pimaker/result'
+    parser.add_argument('-o', '--output',required=True, type=str, default = 'pimaker/result',
                         help='''Location of output files. Sample, Gene, and Site specific results will each have 
                         this prefix + \'_gene.csv\', etc. attached. defaults to \'pimaker/result\'''')                          
     parser.add_argument('--maf', type=float, default=0.0,
@@ -37,17 +33,22 @@ def get_parser():
                         help='''How wide should the rolling window be for a rolling window analysis of pi/piN/piS''')
     parser.add_argument('--pi_only', type=bool, default=False,
                         help='''Most of the processing time for this script is spent on calculating synonymous
-                        and nonsynonymous-specific mutations. Use this flag to skip this analysis and just
-                        calculate pi''')
+                                and nonsynonymous-specific mutations. Use this flag to skip this analysis and just
+                                calculate pi''')
+    parser.add_argument('--small_genome_mode', type=bool, default=False,
+                        help='''Depending on the size of your organism's genome, you may be able to simply
+                                run everything in one chunk. This is the original pimaker algorithm: very fast,
+                                very memory intensive. Best used for genomes of 100,000bp or less. Virologists,
+                                this is for you!''')
     parser.add_argument('--include_stop_codons', type=bool, default=False,
                         help='''Nei and Gojobori 1986 assume that mutations to stop codons do not randomly.
-                        For some populations (especially rapidly adaptive populations), this assumption may
-                        not be valid''')
+                                For some populations (especially rapidly adaptive populations), this assumption may
+                                not be valid''')
     parser.add_argument('--binsize', type=int,
                         help='''Number of nucleotides to process at a time per thread. Higher binsize equals 
-                        faster performance with more memory usage. Lower binsize results in (slightly) slower
-                        performance with less memory usage. Default value is 1,000,000 nucleotides per analyzed
-                        chunk. Please adjust this first if you are encoutering errors due to high memory usage''', default=int(1e6))
+                                faster performance with more memory usage. Lower binsize results in (slightly) slower
+                                performance with less memory usage. Default value is 1,000,000 nucleotides per analyzed
+                                chunk. Please adjust this first if you are encoutering errors due to high memory usage''', default=int(1e6))
     parser.add_argument('-t', '--threads', type=int, default=os.cpu_count()-1,
                         help='''Number of processes to use while performing calculations''')
     return parser
@@ -89,7 +90,7 @@ class MyHelpFormatter(argparse.HelpFormatter):
 def main(args=None):
     print('Welcome to PiMaker!')
     parser = get_parser()
-    arg_name_dict = {'vcf':'vcf_file', 'gtf':'gtf_file', 'threads':'num_processes'}
+    arg_name_dict = {'vcf': 'vcf_file', 'gtf': 'gtf_file', 'threads': 'num_processes', 'output':'output_file_prefix'}
     if len(sys.argv[1:]) == 0:
         parser.print_help()
         parser.exit()

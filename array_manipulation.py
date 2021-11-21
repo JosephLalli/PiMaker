@@ -13,6 +13,7 @@ def calc_overlaps(gene_slices, gene_coords, bin_start, bin_end):
     overlap_dict = {g: np.intersect1d(overlaps, v)[::np.sign(v[-1] - v[0])] for g, v in gene_slices.items()}
     return {k: v for k, v in overlap_dict.items() if len(v) > 0}
 
+
 def coordinates_to_slices(var_sites, genes):
     '''overall_slices: slices concated ref into gene-specific sites
        variable_slices: slices genome-wide var site array into gene-specific var sites

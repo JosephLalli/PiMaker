@@ -40,7 +40,7 @@ mutation_rates={  #source: Pauley, Procario, Lauring 2017: A novel twelve class 
 
 #@profile
 def calcPi(vcf_file, ref_fasta, gtf_file=None, output_file_prefix=None, maf=0.01, mutation_rates=None,
-           rolling_window=None, pi_only=True, include_stop_codons=False,
+           rolling_window=None, pi_only=True, include_stop_codons=False, small_genome_mode=False,
            binsize=int(1e6), cache_folder='chunk_cache', num_processes=1):
     print ("Welcome to PiMaker!")
     if mutation_rates:
@@ -68,13 +68,20 @@ def calcPi(vcf_file, ref_fasta, gtf_file=None, output_file_prefix=None, maf=0.01
     gene_sample_pi = list()
     site_sample_pi = {contig: list() for contig in contig_starts.keys()}
 
-    chunk_result_holder = list()
+    if small_genome_mode:
+        from pm_io import vcf_to_numpy_array_read_cts
+        from small_genome_pimaker import calcPi as calcPi_small_genomes
+
+        read_cts, var_pos = vcf_to_numpy_array_read_cts(vcf_file, maf=maf)
+        args = ref_array, contig_starts, contig_coords, read_cts, sample_list, var_pos
+        args += gene_coords, transcript_to_gene_id, id_to_symbol
+        calcPi_small_genomes(*args)
 
     chunk_queue = mp.Queue(num_processes * 2)
     results_queue = mp.Queue(num_processes * 2)
     tqdm_lock = tqdm.get_lock()
 
-    iterator_args = vcf_file, ref_array, contig_coords, gene_coords, chunk_queue, results_queue, tqdm_lock
+    iterator_args = vcf_file, ref_array, contig_coords, gene_coords, chunk_queue, tqdm_lock
     iterator_kwargs = {'num_var': num_var, 'num_processes': num_processes, 'binsize': binsize, 'maf': maf}
     iterator_process = mp.Process(target=mp_iterate_records, args=iterator_args, kwargs=iterator_kwargs)
     iterator_process.start()
@@ -84,7 +91,6 @@ def calcPi(vcf_file, ref_fasta, gtf_file=None, output_file_prefix=None, maf=0.01
     executors = [mp.Process(target=process_chunk, args=chunk_args + (i,)) for i in range(num_processes)]
     for executor in executors:
         executor.start()
-
 
     none_tracker = 0
     while True:
@@ -106,9 +112,10 @@ def calcPi(vcf_file, ref_fasta, gtf_file=None, output_file_prefix=None, maf=0.01
         executor.close()
 
     pi_per_gene_df = pd.DataFrame()
-    for gene_filename in overall_sample_pi:
+    for gene_filename in gene_sample_pi:
         pi_per_gene_df = pi_per_gene_df.append(pd.read_csv(gene_filename))
-    #this is a very large file. calc the things we need for the sample and contig dataframes, save and close right away.
+        
+    # this is a very large file. calc the things we need for the sample and contig dataframes, save and close right away.
     per_sample_piN = pi_per_gene_df.groupby(['gene_id', 'sample_id']).first().groupby(['sample_id']).apply(lambda x: np.average(x.piN_no_overlap, weights=x.N_sites_no_overlap)).values
     per_sample_piS = pi_per_gene_df.groupby(['gene_id', 'sample_id']).first().groupby(['sample_id']).apply(lambda x: np.average(x.piS_no_overlap, weights=x.S_sites_no_overlap)).values
     per_sample_N_sites = pi_per_gene_df.groupby(['gene_id', 'sample_id']).first().groupby(['sample_id']).apply(lambda x: np.sum(x.N_sites_no_overlap)).values
@@ -118,6 +125,9 @@ def calcPi(vcf_file, ref_fasta, gtf_file=None, output_file_prefix=None, maf=0.01
     per_contig_N_sites = pi_per_gene_df.groupby(['gene_id', 'sample_id']).first().groupby(['contig', 'sample_id']).apply(lambda x: np.sum(x.N_sites_no_overlap)).reset_index()
     per_contig_S_sites = pi_per_gene_df.groupby(['gene_id', 'sample_id']).first().groupby(['contig', 'sample_id']).apply(lambda x: np.sum(x.S_sites_no_overlap)).reset_index()
 
+    # remove temp files and save main file
+    for gene_filename in gene_sample_pi:
+        os.remove(gene_filename)
     pi_per_gene_df.to_csv(output_file_prefix+"_genes.csv")
     del pi_per_gene_df
 
@@ -131,6 +141,9 @@ def calcPi(vcf_file, ref_fasta, gtf_file=None, output_file_prefix=None, maf=0.01
     pi_per_sample_df['piS'] = per_sample_piS
     pi_per_sample_df['N_sites'] = per_sample_N_sites
     pi_per_sample_df['S_sites'] = per_sample_S_sites
+
+    for sample_filename in overall_sample_pi:
+        os.remove(sample_filename)
 
     pi_per_sample_df.to_csv(output_file_prefix + "_samples.csv")
     del pi_per_sample_df
@@ -147,11 +160,14 @@ def calcPi(vcf_file, ref_fasta, gtf_file=None, output_file_prefix=None, maf=0.01
         del site_pi_df
         sample_contig_stats = [{'sample_id': sample_id, 'contig': contig, 'contig_length': contig_lengths[contig], 'pi': pi} for sample_id, pi in zip(sample_list, contig_pis[contig])]
         pi_per_contig_df = pd.DataFrame(sample_contig_stats)
-        pi_per_contig_df['piN'] = per_contig_piN.loc[per_contig_piN.contig==contig].values
-        pi_per_contig_df['piS'] = per_contig_piS.loc[per_contig_piS.contig==contig].values
-        pi_per_contig_df['N_sites'] = per_contig_N_sites.loc[per_contig_N_sites.contig==contig].values
-        pi_per_contig_df['S_sites'] = per_contig_S_sites.loc[per_contig_S_sites.contig==contig].values
-        pi_per_contig_df.to_csv(output_file_prefix + f'_{contig}_summary_statistics.csv')
+        pi_per_contig_df['piN'] = per_contig_piN.loc[per_contig_piN.contig == contig].values
+        pi_per_contig_df['piS'] = per_contig_piS.loc[per_contig_piS.contig == contig].values
+        pi_per_contig_df['N_sites'] = per_contig_N_sites.loc[per_contig_N_sites.contig == contig].values
+        pi_per_contig_df['S_sites'] = per_contig_S_sites.loc[per_contig_S_sites.contig == contig].values
+
+        for tmp_df in dfs:
+            os.remove(tmp_df)
+        pi_per_contig_df.to_csv(output_file_prefix + f'_{contig}_summary_statistics.csv.gz', compression='gzip')
         del pi_per_contig_df
 
     return None

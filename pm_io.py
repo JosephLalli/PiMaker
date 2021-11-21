@@ -241,22 +241,26 @@ def create_combined_reference_Array(ref_fasta):
 
 
 def vcf_to_numpy_array_read_cts(vcf_file, contig_coords, region=None, maf=0):
-    '''as currently coded, errors if region is not specified to at least one contig'''
-    if region is None:
-        raise NotImplementedError('Currently we cannot read more than one contig\'s mutations at once. Apologies. Please specify the contig in the region parameter.')
+    # '''as currently coded, errors if region is not specified to at least one contig'''
+    # if region is None:
+    #     raise NotImplementedError('Currently we cannot read more than one contig\'s mutations at once. Apologies. Please specify the contig in the region parameter.')
     better_names_for_vcf_fields = {'calldata/AD': 'AD', 'calldata/DP': 'DP', 'calldata/RD': 'RD',
                                     'variants/ALT': 'alt', 'variants/CHROM': 'contig',
                                     'variants/POS': 'pos', 'variants/REF': 'ref'}
     fields_to_extract = list(better_names_for_vcf_fields.keys()) + ['samples']
     vcf = allel.read_vcf(vcf_file, fields=fields_to_extract, rename_fields=better_names_for_vcf_fields, region=region)
-    if vcf is None:
-        print ('allel returned a vcf of none!')
-        print (vcf_file, region)
-        print (vcf.keys())
-        print (vcf['pos'])
-        raise TypeError
-    og_var_pos = vcf['pos'] + contig_coords[0]  # var_pos = [pos + contig_starts[contig] for pos, contig in zip(vcf['pos'], vcf['contig'])]
-    var_pos, var_pos_ind = np.unique(og_var_pos, return_index=True)
+    # if vcf is None:
+    #     print ('allel returned a vcf of none!')
+    #     print (vcf_file, region)
+    #     print (vcf.keys())
+    #     print (vcf['pos'])
+    #     raise TypeError
+    # pos is 1-indexed in allel
+    if region is None:
+        vcf['contig']
+    else:
+        og_var_pos = vcf['pos'] + contig_coords[0] - 1  # var_pos = [pos + contig_starts[contig] for pos, contig in zip(vcf['pos'], vcf['contig'])]
+        var_pos, var_pos_ind = np.unique(og_var_pos, return_index=True)
     if len(var_pos) < len(og_var_pos):  # if multiallelic sites are already split up, I need to concat them back together
         vcf['ref'] = vcf['ref'][var_pos_ind]
         vcf['RD'] = merge_split_multiallelics(vcf['RD'], og_var_pos, action='sum')
@@ -296,8 +300,8 @@ def save_tmp_chunk_results(contig, chunk_id, chunk_sample_pi, chunk_gene_pi, chu
     overall_sample_pi_columns = list(['sample_id', 'contig', 'chunk_id', 'chunk_len', 'stat_name', 'stat'])
     site_sample_pi_columns =    tuple(['sample_id', 'contig', 'stat_name'])
     gene_sample_pi_columns =    list(['sample_id', 'contig', 'chunk_id', 'transcript_id', 'transcript', 'gene_id', 'gene_symbol',
-                                        'transcript_len', 'transcript_len_no_overlap', 'pi', 'piN', 'piS', 'N_sites', 'S_sites',
-                                        'pi_no_overlap', 'piN_no_overlap', 'piS_no_overlap', 'N_sites_no_overlap', 'S_sites_no_overlap'])
+                                      'transcript_len', 'transcript_len_no_overlap', 'pi', 'piN', 'piS', 'N_sites', 'S_sites',
+                                      'pi_no_overlap', 'piN_no_overlap', 'piS_no_overlap', 'N_sites_no_overlap', 'S_sites_no_overlap'])
     chunk_site_pi_df = pd.DataFrame(chunk_site_pi, columns=(site_sample_pi_columns + tuple(var_site_positions)))
     chunk_sample_pi_df = pd.DataFrame(chunk_sample_pi, columns=overall_sample_pi_columns)
     chunk_gene_pi_df = pd.DataFrame(chunk_gene_pi, columns=gene_sample_pi_columns)

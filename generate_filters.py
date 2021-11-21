@@ -113,44 +113,43 @@ def make_synon_nonsynon_site_dict(num_sites_dict, include_stop_codons=False):
 
 def generate_codon_synon_mutation_filters():
     '''return dictionary of codons and 7x3 nonsynon filters'''
-    mutationID = {'AC':1,'CA':1, 'AG':2,'GA':2, 'AT':3,'TA':3, 'CG':4,'GC':4, 'CT':5,'TC':5, 'GT':6,'TG':6}
-    mutationID = {(nuc_tuple[nucs.index(key[0])] + nuc_tuple[nucs.index(key[1])]):code for key, code in mutationID.items()}
-    #generate dictionary of codon to 3x7 nonsynon filter arrays:
-    synonPiTranslate = {flatten_codon(codon):np.zeros((3,7), dtype=bool) for codon in all_codons}
-    nonSynonPiTranslate = {flatten_codon(codon):np.zeros((3,7), dtype=bool) for codon in all_codons}
+    mutationID = {'AC': 1, 'CA': 1, 'AG': 2, 'GA': 2, 'AT': 3, 'TA': 3, 'CG': 4, 'GC': 4, 'CT': 5, 'TC': 5, 'GT': 6, 'TG': 6}
+    mutationID = {(nuc_tuple[nucs.index(key[0])] + nuc_tuple[nucs.index(key[1])]): code for key, code in mutationID.items()}
+    # generate dictionary of codon to 3x7 nonsynon filter arrays:
+    synonPiTranslate = {flatten_codon(codon): np.zeros((3, 7), dtype=bool) for codon in all_codons}
+    nonSynonPiTranslate = {flatten_codon(codon): np.zeros((3, 7), dtype=bool) for codon in all_codons}
     for codon in all_codons:
         if (0, 0, 0, 0) in codon:
-            continue #Ignore Ns - codons w/ N will not be factored into synon/nonsynon math
-        nonSynonPiTranslate[flatten_codon(codon)][:,0] = 1
-        synonPiTranslate[flatten_codon(codon)][:,0] = 1
+            continue  # Ignore Ns - codons w/ N will not be factored into synon/nonsynon math
+        nonSynonPiTranslate[flatten_codon(codon)][:, 0] = 1
+        synonPiTranslate[flatten_codon(codon)][:, 0] = 1
         for n, refNuc in enumerate(codon):
             for nuc in nuc_tuple:
-                if nuc == refNuc or nuc == (0,0,0,0):
+                if nuc == refNuc or nuc == (0, 0, 0, 0):
                     continue
-                altCodon = codon[:n] + (nuc,) + codon[n+1:]
+                altCodon = codon[:n] + (nuc,) + codon[n + 1:]
                 if one_hot_translate[codon] != one_hot_translate[altCodon]:
-                    nonSynonPiTranslate[flatten_codon(codon)][n, mutationID[refNuc+nuc]] = 1
+                    nonSynonPiTranslate[flatten_codon(codon)][n, mutationID[refNuc + nuc]] = 1
                 elif one_hot_translate[codon] == one_hot_translate[altCodon]:
-                    synonPiTranslate[flatten_codon(codon)][n, mutationID[refNuc+nuc]] = 1
+                    synonPiTranslate[flatten_codon(codon)][n, mutationID[refNuc + nuc]] = 1
     return synonPiTranslate, nonSynonPiTranslate
 
 
-#@profile
 def generate_coding_filters(sample_consensus_seqs, synonSiteCount, nonSynonSiteCount, idx_of_var_sites_in_gene=None, gene_name=None):
     '''given numpy array of char sequences, return:
        - #samples by #nucs by 7 synon filter array
        - same thing for nonsynon filter
        - array of synon/nonsynon counts (2 by nucs by samples)'''
     # Recieves sample_consensus_seqs for just one gene
-    #for all potential codons, find indexes of all instances of codon
-    #and put relevant filter in numpy array at that index
+    # for all potential codons, find indexes of all instances of codon
+    # and put relevant filter in numpy array at that index
     num_samples = sample_consensus_seqs.shape[0]
     diff_from_three = sample_consensus_seqs.shape[1] % 3
     if diff_from_three != 0:
         with open('log.txt', 'a') as log:
             log.write(f'{gene_name} had a length of {sample_consensus_seqs.shape[1]} nt; off by {diff_from_three}. First codon was {tuple(sample_consensus_seqs[0, :3, :].flatten())}\n')
         sample_consensus_seqs = sample_consensus_seqs[:, sample_consensus_seqs.shape[1] % 3, ...]
-    sample_consensus_seqs = sample_consensus_seqs.reshape(num_samples,-1,12).astype(np.uint8)
+    sample_consensus_seqs = sample_consensus_seqs.reshape(num_samples, -1, 12).astype(np.uint8)
     num_codons = sample_consensus_seqs.shape[1]
 
     nonSynonFilter = np.zeros((num_samples, num_codons, 3, 7), dtype=bool)
@@ -174,29 +173,28 @@ def generate_coding_filters(sample_consensus_seqs, synonSiteCount, nonSynonSiteC
     num_const_nonsynon_sites = 0
 
     if idx_of_var_sites_in_gene is not None:
-        sample_consensus_seqs = sample_consensus_seqs.reshape(sample_consensus_seqs.shape[0],-1,4)
+        sample_consensus_seqs = sample_consensus_seqs.reshape(sample_consensus_seqs.shape[0], -1, 4)
         tmp_mask = np.ones(sample_consensus_seqs.shape, dtype=bool)
         tmp_mask[:, idx_of_var_sites_in_gene, :] = False
-        num_const_nonsynon_sites = (nonSynonSites*sample_consensus_seqs*tmp_mask).sum(2).sum(1)
-        num_const_synon_sites = (synonSites*sample_consensus_seqs*tmp_mask).sum(2).sum(1)
+        num_const_nonsynon_sites = (nonSynonSites * sample_consensus_seqs * tmp_mask).sum(2).sum(1)
+        num_const_synon_sites = (synonSites * sample_consensus_seqs * tmp_mask).sum(2).sum(1)
         nonSynonFilter = nonSynonFilter[:, idx_of_var_sites_in_gene, :]
         synonFilter = synonFilter[:, idx_of_var_sites_in_gene, :]
         nonSynonSites = nonSynonSites[:, idx_of_var_sites_in_gene, :]
         synonSites = synonSites[:, idx_of_var_sites_in_gene, :]
-    
+
     return synonFilter, nonSynonFilter, synonSites, nonSynonSites, num_const_synon_sites, num_const_nonsynon_sites
 
 
-#@profile
 def translate_codons(sample_consensus_seqs, codon, filters, synonSiteCount, nonSynonSiteCount):
     '''time is 2.04ms for all, even w/ conversion (conversion adds 0.1ms)'''
     ixs = get_idx(sample_consensus_seqs.reshape(-1, 12), codon)
     ixs = np.unravel_index(ixs, shape=sample_consensus_seqs.shape[:2])
     ns, s, nss, ss = filters
-    ns[ixs[0],ixs[1],:,:] = nonSynonPiTranslate[codon][np.newaxis,np.newaxis,:,:]
-    s[ixs[0],ixs[1],:,:] = synonPiTranslate[codon][np.newaxis,np.newaxis,:,:]
-    nss[ixs[0],ixs[1],:,:] = nonSynonSiteCount[codon][np.newaxis,np.newaxis,:,:]
-    ss[ixs[0],ixs[1],:,:] = synonSiteCount[codon][np.newaxis,np.newaxis,:,:]
-    return ns,s,nss,ss
+    ns[ixs[0], ixs[1], :, :] = nonSynonPiTranslate[codon][np.newaxis, np.newaxis, :, :]
+    s[ixs[0], ixs[1], :, :] = synonPiTranslate[codon][np.newaxis, np.newaxis, :, :]
+    nss[ixs[0], ixs[1], :, :] = nonSynonSiteCount[codon][np.newaxis, np.newaxis, :, :]
+    ss[ixs[0], ixs[1], :, :] = synonSiteCount[codon][np.newaxis, np.newaxis, :, :]
+    return ns, s, nss, ss
 
 synonPiTranslate, nonSynonPiTranslate = generate_codon_synon_mutation_filters()
