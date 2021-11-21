@@ -23,6 +23,9 @@ def get_parser():
     parser.add_argument('-g', '--gtf',required=True, type=str,
                         help='''GTF file containing locations of all genes and transcripts of interest in the
                                 reference fasta file''')
+    parser.add_argument('-o', '--output',required=True, type=str, default = 'pimaker/result'
+                        help='''Location of output files. Sample, Gene, and Site specific results will each have 
+                        this prefix + \'_gene.csv\', etc. attached. defaults to \'pimaker/result\'''')                          
     parser.add_argument('--maf', type=float, default=0.0,
                         help='''Minimum intra-sample frequency of variants to be considered when calculating 
                                 diversity''')
@@ -99,10 +102,16 @@ def main(args=None):
 
     from timeit import default_timer as timer
     start = timer()
+    with open('log.txt', 'a') as f:
+        f.write(f'{start}\n')
     from pimaker import calcPi
     results = calcPi(**args)
     stop = timer()
+    
     print(stop - start)
+    with open('log.txt', 'a') as f:
+        f.write(f'{stop}\n')
+        f.write(f'{stop - start}\n')
     return None
 
 

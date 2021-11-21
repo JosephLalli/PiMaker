@@ -2,11 +2,12 @@ import os
 import numpy as np
 import pysam
 from tqdm import tqdm, trange
-from pm_io import get_num_var, get_sample_list, pool_to_numpy, retrieve_genes_in_region, format_mut_array
+from pm_io import get_num_var, get_sample_list, pool_to_numpy, retrieve_genes_in_region, format_mut_array, vcf_to_numpy_array_read_cts
 from diversity_calcs import performPiCalc, calcPerSitePi, calcPerSamplePi
 from generate_filters import generate_coding_filters
 from array_manipulation import calc_consensus_seqs, coordinates_to_slices, calc_overlaps
 
+use_allel = True
 
 def process_chunk(chunk_queue, result_queue, sample_list, contig_coords, id_to_symbol, transcript_to_gene_id, synon_cts, tqdm_lock, process_id):
     tqdm.set_lock(tqdm_lock)
@@ -43,9 +44,9 @@ def process_chunk(chunk_queue, result_queue, sample_list, contig_coords, id_to_s
         ##TODO: This step takes a surprising amount of time
         gene_slices, gene_var_slices, idx_of_var_sites = coordinates_to_slices(var_pos, gene_coords)
         overlapping_out_of_frame_idx = calc_overlaps(gene_slices, gene_coords, bin_start, bin_end)
-        
+
         sample_consensus_seqs = calc_consensus_seqs(read_cts, ref_array_chunk, var_pos)
-        
+
         for i, (gene, gene_slice) in enumerate(tqdm(gene_slices.items(), position=(process_id + 2))):
             basic_gene_data = (contig, chunk_id, gene, id_to_symbol[gene], transcript_to_gene_id[gene],
                                id_to_symbol[transcript_to_gene_id[gene]], len(gene_slice))
@@ -55,50 +56,59 @@ def process_chunk(chunk_queue, result_queue, sample_list, contig_coords, id_to_s
                          synon_cts, freq_cts[:, gene_var_slice, :], piMath[:, gene_var_slice, :],
                          sample_list, overlapping_out_of_frame_idx, gene, gene_slice, basic_gene_data)
             chunk_gene_pi.extend(process_gene(*gene_args))
-        result_queue.put((contig, chunk_sample_pi, chunk_gene_pi, chunk_site_pi, var_pos))
+        result_queue.put((contig, chunk_id, chunk_sample_pi, chunk_gene_pi, chunk_site_pi, var_pos))
 
 
-def mp_iterate_records(vcf_file, ref_array, contig_coords, gene_coords, chunk_queue, result_queue, tqdm_lock, num_var=None, num_processes=1, binsize=int(1e6), maf=0):
+def mp_iterate_records(vcf_file, ref_array, contig_coords, gene_coords, chunk_queue, result_queue, tqdm_lock, num_var=None, num_processes=1, binsize=int(1e6), maf=0, cache_folder='chunk_cache'):
     '''pre-process chunk and place in mp.Queue'''
     # create cache folder
     tqdm.set_lock(tqdm_lock)
-    if not os.path.isdir('chunk_cache'):
-        os.mkdir('chunk_cache')
-    mut_suffix = vcf_file.split('.')[-1]
-    if 'vcf' in mut_suffix:
-        vcf = pysam.VariantFile(vcf_file, threads=os.cpu_count() / 2)
-        sample_list = get_sample_list(vcf_file)
-    elif 'sync' in mut_suffix:
+    mut_suffix = vcf_file.split('.')[-1:]
+
+    if 'sync' in mut_suffix:
         read_cts, var_pos, sample_list = pool_to_numpy(vcf_file)
+    else:  # assume vcf
+        if use_allel: # if using allel
+            sample_list = get_sample_list(vcf_file)
+        else: # if using pysam
+            vcf = pysam.VariantFile(vcf_file, threads=os.cpu_count() / 2)
+            sample_list = get_sample_list(vcf_file)
 
     if num_var is None:
         num_var = get_num_var(vcf_file)
 
-    bin_start = 0
-    bin_end = 0
     chunk_id = 0
     for contig, (contig_start, contig_end) in contig_coords.items():
+        bin_start = contig_start
         bin_end = 0
-        for i in trange(int((contig_end - contig_start) // binsize), total=int(num_var // binsize), position=1):
-            bin_start = i * binsize
-            bin_end = np.min((binsize * (i + 1) + contig_start, contig_end))
-            genes, bin_end = retrieve_genes_in_region(bin_start, bin_end, gene_coords[contig])
-            # subtract bin start from gene coords
+        for i in trange(int((contig_end - contig_start) // binsize) + 1, total=int((contig_end - contig_start) // binsize)+1, position=1):
+            
+            bin_start = np.max((((i * binsize) + contig_start), bin_end))
+            if bin_start > contig_end:
+                continue
+            bin_end = np.min(((binsize * (i + 1) + contig_start), contig_end))
+            genes, bin_end = retrieve_genes_in_region(bin_start, bin_end, gene_coords[contig], contig_start)
+
             genes = {g: tuple((exon_start - bin_start, exon_end - bin_start) for exon_start, exon_end in coords) for g, coords in genes.items()}
-            cache_base_name = f'chunk_cache/{contig}_{bin_start}_{bin_end}'
+
+            cache_base_name = f'{cache_folder}/{contig}_{bin_start}_{bin_end}'
 
             # if os.path.exists(f'{cache_base_name}_read_cts.npy'):
             #     read_cts = np.load(f'{cache_base_name}_read_cts.npy')
             #     var_pos = np.load(f'{cache_base_name}_var_pos.npy')
-            # elif:
-            if 'vcf' in mut_suffix:
-                muts = vcf.fetch(contig=contig, start=bin_start, end=bin_end)
-                read_cts, var_pos = format_mut_array(muts, len(sample_list), bin_end - bin_start, contig_coords, maf, tqdm_lock)
-            elif 'pool' in mut_suffix:
-                pass  # all info already loaded
+            if 'sync' in mut_suffix:
+                np.save(f'{cache_base_name}_read_cts.npy', read_cts)
+                np.save(f'{cache_base_name}_var_pos.npy', var_pos)
+            else:  # assume vcf
+                if use_allel:
+                    read_cts, var_pos = vcf_to_numpy_array_read_cts(vcf_file, contig_coords[contig], region=f'{contig}:{bin_start}-{bin_end}', maf=maf)
+                else:
+                    muts = vcf.fetch(contig=contig, start=bin_start, end=bin_end)
+                    read_cts2, var_pos2 = format_mut_array(muts, len(sample_list), bin_end - bin_start, contig_coords, maf, tqdm_lock)
+                    
+                np.save(f'{cache_base_name}_read_cts.npy', read_cts)
+                np.save(f'{cache_base_name}_var_pos.npy', var_pos)
             # load read_cts and var_pos from cache if available, since this takes so long
-            np.save(f'{cache_base_name}_read_cts.npy', read_cts)
-            np.save(f'{cache_base_name}_var_pos.npy', var_pos)
 
             chunk_queue.put((read_cts, var_pos - bin_start, genes, ref_array[:, bin_start:bin_end, :], bin_start, bin_end, contig, chunk_id))
             chunk_id += 1
@@ -132,8 +142,8 @@ def process_gene(read_cts, sample_consensus_seqs, muts_in_gene, synon_cts, SNP_f
         synon_filters = generate_coding_filters(sample_consensus_seqs, *synon_cts, idx_of_var_sites_in_gene=muts_in_gene, gene_name=gene)
     except ValueError:
         with open('log.txt', 'a') as log:
-            log.write(f'Chrom {basic_gene_data[0]}, chunk id {basic_gene_data[1]}, transcript {basic_gene_data[2]}, gene {basic_gene_data[4]} errored out. Gene length was {basic_gene_data[6]}, which is {basic_gene_data[6]%3} off. First few nucs were {tuple(sample_consensus_seqs[0, :6, :].flatten())}')
-            return [(sample_id,) + basic_gene_data + tuple(data) for sample_id, data, in zip(sample_list, chunk_gene_pi_vals.T)]
+            log.write(f'Chrom {basic_gene_data[0]}, chunk id {basic_gene_data[1]}, transcript {basic_gene_data[2]}, gene {basic_gene_data[4]} errored out. Gene length was {basic_gene_data[6]}, which is {basic_gene_data[6]%3} off. First few nucs were {tuple(sample_consensus_seqs[0, :6, :].flatten())}\n')
+        return [(sample_id,) + basic_gene_data + tuple(data) for sample_id, data, in zip(sample_list, chunk_gene_pi_vals.T)]
     synonFilter, nonSynonFilter, synonSiteFilter, nonSynonSiteFilter, num_const_synon_sites, num_const_nonsynon_sites = synon_filters
 
     # gene_read_cts = read_cts[:,:,gene_var_slice]

@@ -148,7 +148,7 @@ def generate_coding_filters(sample_consensus_seqs, synonSiteCount, nonSynonSiteC
     diff_from_three = sample_consensus_seqs.shape[1] % 3
     if diff_from_three != 0:
         with open('log.txt', 'a') as log:
-            log.write(f'{gene_name} had a length of {sample_consensus_seqs.shape[1]} nt; off by {diff_from_three}. First codon was {tuple(sample_consensus_seqs[0, :3, :].flatten())}')
+            log.write(f'{gene_name} had a length of {sample_consensus_seqs.shape[1]} nt; off by {diff_from_three}. First codon was {tuple(sample_consensus_seqs[0, :3, :].flatten())}\n')
         sample_consensus_seqs = sample_consensus_seqs[:, sample_consensus_seqs.shape[1] % 3, ...]
     sample_consensus_seqs = sample_consensus_seqs.reshape(num_samples,-1,12).astype(np.uint8)
     num_codons = sample_consensus_seqs.shape[1]
