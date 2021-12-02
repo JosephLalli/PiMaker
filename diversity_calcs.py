@@ -1,5 +1,6 @@
 import numpy as np
 
+
 def performPiCalc(read_cts):
     piCalcs = np.zeros(shape=(read_cts.shape[0:2] + (7,)), dtype=np.int32)
     piCalcs[:, :, 0] = np.sum(read_cts, axis=2)

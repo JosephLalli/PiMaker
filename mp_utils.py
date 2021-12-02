@@ -1,26 +1,23 @@
-import os
 import numpy as np
-import pysam
-from tqdm import tqdm, trange
-from pm_io import get_num_var, get_sample_list, pool_to_numpy, retrieve_genes_in_region, format_mut_array, vcf_to_numpy_array_read_cts
-from diversity_calcs import performPiCalc, calcPerSitePi, calcPerSamplePi
-from generate_filters import generate_coding_filters
-from array_manipulation import calc_consensus_seqs, coordinates_to_slices, calc_overlaps
-
-use_allel = True
+from tqdm import tqdm
+from .pm_io import get_num_var, get_sample_list, pool_to_numpy, retrieve_genes_in_region, vcf_to_numpy_array_read_cts
+from .diversity_calcs import performPiCalc, calcPerSitePi, calcPerSamplePi
+from .generate_filters import generate_coding_filters
+from .array_manipulation import calc_consensus_seqs, coordinates_to_slices, calc_overlaps
+import pickle
 
 
 def process_chunk(chunk_queue, result_queue, sample_list, contig_coords, id_to_symbol, 
                   transcript_to_gene_id, synon_cts, tqdm_lock, process_id, pi_only=False):
     tqdm.set_lock(tqdm_lock)
-    with tqdm(position=process_id+2) as pbar:
+    with tqdm(position=(process_id + 2)) as pbar:
         while True:
             chunk = chunk_queue.get()
             if chunk is None:
                 result_queue.put(None)
                 pbar.close()
                 pbar.reset()
-                return None
+                break
             read_cts, var_pos, gene_coords, ref_array_chunk, bin_start, bin_end, contig, chunk_id = chunk
             pbar.reset()
             pbar.set_description(f'{contig}:{bin_start}-{bin_end}')
@@ -35,15 +32,15 @@ def process_chunk(chunk_queue, result_queue, sample_list, contig_coords, id_to_s
             # print ('Calculating Pi...')
             piMath = performPiCalc(read_cts)
             with np.errstate(divide='ignore', invalid='ignore'):
-                freq_cts = read_cts.astype(np.float32) / read_cts.sum(2, keepdims=True).astype(np.float32)
-                freq_cts = np.nan_to_num(freq_cts)
+                freq_cts = np.where(read_cts.sum(axis=2, keepdims=True) == 0, ref_array_chunk[:, var_pos, :], read_cts)
+                freq_cts = freq_cts / freq_cts.sum(axis=2, keepdims=True)
 
             chunk_per_site_pi = calcPerSitePi(piMath)
             chunk_per_sample_pi = calcPerSamplePi(chunk_per_site_pi, length=(bin_end - bin_start))
 
             # before processing gene results, record pi data
-            chunk_sample_pi.extend([(sample_id,) + basic_data + ('pi',) + tuple((pi,)) for sample_id, pi in zip(sample_list, chunk_per_sample_pi)])
-            chunk_site_pi.extend([(sample_id, contig, 'pi') + tuple(tuple(pi,)) for sample_id, pi in zip(sample_list, chunk_per_site_pi)])
+            chunk_sample_pi.extend([(sample_id,) + basic_data + ('pi',) + (pi,) for sample_id, pi in zip(sample_list, chunk_per_sample_pi)])
+            chunk_site_pi.extend([(sample_id, contig, 'pi') + tuple(pi) for sample_id, pi in zip(sample_list, chunk_per_site_pi)])
 
             # Now calculate coding regions' Pi/PiN/PiS
             ##TODO: This step takes a surprising amount of time
@@ -69,6 +66,12 @@ def process_chunk(chunk_queue, result_queue, sample_list, contig_coords, id_to_s
                 pbar.update(1)
             pbar.refresh()
             result_queue.put((contig, chunk_id, chunk_sample_pi, chunk_gene_pi, chunk_site_pi, var_pos))
+            to_save = (read_cts, var_pos, gene_coords, ref_array_chunk, bin_start, bin_end, contig, chunk_id, piMath, freq_cts, chunk_per_site_pi, chunk_per_sample_pi, chunk_sample_pi, chunk_site_pi, read_cts[:, gene_var_slice, :], sample_consensus_seqs[:, gene_slice, :], muts_in_gene, synon_cts, freq_cts[:, gene_var_slice, :], piMath[:, gene_var_slice, :], sample_list, overlapping_out_of_frame_idx, gene, gene_slice, basic_gene_data, gene_var_slice)
+            if 'NP' in contig:
+                with open('NP.pkl', 'wb') as f:
+                    pickle.dump(to_save, f)
+        pbar.clear()
+    return None
 
 
 def mp_iterate_records(vcf_file, ref_array, contig_coords, gene_coords, chunk_queue, tqdm_lock,
@@ -81,16 +84,10 @@ def mp_iterate_records(vcf_file, ref_array, contig_coords, gene_coords, chunk_qu
     if 'sync' in mut_suffix:
         read_cts, var_pos, sample_list = pool_to_numpy(vcf_file)
     else:  # assume vcf
-        if use_allel:  # if using allel
-            sample_list = get_sample_list(vcf_file)
-        else:  # if using pysam
-            vcf = pysam.VariantFile(vcf_file, threads=os.cpu_count() / 2)
-            sample_list = get_sample_list(vcf_file)
+        sample_list = get_sample_list(vcf_file)
 
     if num_var is None:
         num_var = get_num_var(vcf_file)
-    print ('Number of chunks to get through (in theory):')
-    print (ref_array.shape[1] // binsize)
     chunk_id = 0
     with tqdm(position=1) as pbar:
         for contig, (contig_start, contig_end) in contig_coords.items():
@@ -100,9 +97,6 @@ def mp_iterate_records(vcf_file, ref_array, contig_coords, gene_coords, chunk_qu
             bin_end = 0
             pbar.reset(total=int((contig_end - contig_start) // binsize) + 1)
             for i in range(int((contig_end - contig_start) // binsize) + 1):
-                if chunk_id < 66:
-                    chunk_id += 1
-                    continue
                 bin_start = np.max((((i * binsize) + contig_start), bin_end))
                 if bin_start > contig_end:
                     continue
@@ -121,18 +115,13 @@ def mp_iterate_records(vcf_file, ref_array, contig_coords, gene_coords, chunk_qu
                 #     np.save(f'{cache_base_name}_read_cts.npy', read_cts)
                 #     np.save(f'{cache_base_name}_var_pos.npy', var_pos)
                 # else:  # assume vcf
-                if use_allel:
-                    try:
-                        # allel is 1-indexed
-                        region_string = f'{contig}:{bin_start - contig_coords[contig][0]}-{bin_end - contig_coords[contig][0]}'
-                        read_cts, var_pos = vcf_to_numpy_array_read_cts(vcf_file, contig_coords[contig], region=region_string, maf=maf)
-                    except (AttributeError, TypeError):
-                        print (f'\n\n\n\n\n\n\n\n\n\ncontig:{contig}, bin_start: {bin_start}, bin_end {bin_end}, region string {contig}:{bin_start-contig_coords[contig][0]}-{bin_end-contig_coords[contig][0]} errored out with a None returned VCF file\n\n\n\n\n\n\n\n\n\n')
-                        continue
-                    # print (contig, bin_start, bin_end, var_pos[0], var_pos[-1])
-                else:
-                    muts = vcf.fetch(contig=contig, start=bin_start, end=bin_end)
-                    read_cts, var_pos = format_mut_array(muts, len(sample_list), bin_end - bin_start, contig_coords, maf, tqdm_lock)
+                try:
+                    # allel is 1-indexed
+                    region_string = f'{contig}:{bin_start - contig_coords[contig][0]}-{bin_end - contig_coords[contig][0]}'
+                    read_cts, var_pos = vcf_to_numpy_array_read_cts(vcf_file, contig_coords[contig], region=region_string, maf=maf)
+                except (AttributeError, TypeError):
+                    print (f'\n\n\n\n\n\n\n\n\n\ncontig:{contig}, bin_start: {bin_start}, bin_end {bin_end}, region string {contig}:{bin_start-contig_coords[contig][0]}-{bin_end-contig_coords[contig][0]} errored out with a None returned VCF file\n\n\n\n\n\n\n\n\n\n')
+                    continue
 
                     # np.save(f'{cache_base_name}_read_cts.npy', read_cts)
                     # np.save(f'{cache_base_name}_var_pos.npy', var_pos)
@@ -142,12 +131,14 @@ def mp_iterate_records(vcf_file, ref_array, contig_coords, gene_coords, chunk_qu
                 chunk_id += 1
                 pbar.update(1)
             pbar.refresh()
-            
+        pbar.clear()
+
     # Once out of data, put num_processes number of Nones in chunk_queue
     for _ in range(num_processes):
         chunk_queue.put(None)
+    pbar.clear()
     pbar.close()
-    pbar.refresh()
+
     return None
 
 
@@ -171,7 +162,8 @@ def process_gene(read_cts, sample_consensus_seqs, muts_in_gene, synon_cts, SNP_f
         except ValueError:
             with open('log.txt', 'a') as log:
                 log.write(f'Chrom {basic_gene_data[0]}, chunk id {basic_gene_data[1]}, transcript {basic_gene_data[2]}, gene {basic_gene_data[4]} errored out. Gene length was {basic_gene_data[6]}, which is {basic_gene_data[6]%3} off. First few nucs were {tuple(sample_consensus_seqs[0, :6, :].flatten())}\n')
-            return [(sample_id,) + basic_gene_data+(basic_gene_data[-1],) + tuple(data) for sample_id, data, in zip(sample_list, chunk_gene_pi_vals.T)]
+            return [(sample_id,) + basic_gene_data + (basic_gene_data[-1],) + tuple(data)
+                    for sample_id, data, in zip(sample_list, chunk_gene_pi_vals.T)]
         synonFilter, nonSynonFilter, synonSiteFilter, nonSynonSiteFilter, num_const_synon_sites, num_const_nonsynon_sites = synon_filters
 
         nonsynon_sites = (SNP_freqs * nonSynonSiteFilter).sum(axis=2)

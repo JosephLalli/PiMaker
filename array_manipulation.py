@@ -1,6 +1,6 @@
 import numpy as np
 from itertools import chain
-from diversity_calcs import determine_read_frame
+from .diversity_calcs import determine_read_frame
 
 
 def calc_overlaps(gene_slices, gene_coords, bin_start, bin_end):
@@ -38,13 +38,13 @@ def calc_consensus_seqs(read_cts, ref_seq_array, var_index):
     '''given dataframe of VCF with variable sites and numpy refseq array,
     returns numpy array of refseqs with sample key'''
     all_ref_seqs = np.tile(ref_seq_array, (read_cts.shape[0], 1, 1)).astype(bool).copy()
+    # Fill reference
+    read_cts = np.where(np.all(read_cts == 0, axis=2, keepdims=True), all_ref_seqs[:, var_index], read_cts)
     # using argmax to ensure only one nucleotide is True
     var_ref_seqs = np.zeros(read_cts.shape, dtype=bool)
     np.put_along_axis(var_ref_seqs, np.argmax(read_cts, axis=2)[:, :, np.newaxis], True, axis=2)
-    zeros = np.where(np.all(read_cts == 0, axis=2))
-    ref_zeros = all_ref_seqs[zeros]
     all_ref_seqs[:, var_index, :] = var_ref_seqs
-    all_ref_seqs[zeros] = ref_zeros
+
     return all_ref_seqs
 
 

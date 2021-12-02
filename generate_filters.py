@@ -1,6 +1,6 @@
 import numpy as np
 from itertools import product
-from array_manipulation import get_idx, flatten_codon
+from .array_manipulation import get_idx, flatten_codon
 # import line_profiler, builtins
 # profile = line_profiler.LineProfiler()
 # builtins.__dict__['profile'] = profile
@@ -9,7 +9,7 @@ nuc_dict = {'A': 0, 'C': 1, 'G': 2, 'T': 3, 'N': 4}
 nuc_array = np.concatenate((np.eye(4, dtype=np.int16), np.zeros((1,4), dtype=np.int16)))
 nuc_tuple = tuple(map(tuple, nuc_array))
 nucs = "ACGTN"
-all_codons = list(product(nuc_tuple, repeat=3)) # ensures all the weird codons (ie w/ N) are represented to avoid key errors
+all_codons = list(product(nuc_tuple, repeat=3))  # ensures all the weird codons (ie w/ N) are represented to avoid key errors
 
 translate = {
     'ATA':'I', 'ATC':'I', 'ATT':'I', 'ATG':'M',
@@ -51,8 +51,8 @@ def make_num_sites_dict(mutation_rates=None, include_stop_codons=False):
     numsitespercodon = {flatten_codon(codon):{0:{'s':0,'n':0},1:{'s':0,'n':0},2:{'s':0,'n':0}, 'all':{'s':0,'n':0}} for codon in all_codons}
     for codon, AA in one_hot_translate.items():
         if AA == '*' and not include_stop_codons:
-            numsitespercodon[flatten_codon(codon)][i]['s'] = 0
-            numsitespercodon[flatten_codon(codon)][i]['n'] = 0
+            # numsitespercodon[flatten_codon(codon)][i]['s'] = 0
+            # numsitespercodon[flatten_codon(codon)][i]['n'] = 0
             continue
         else:
             for i in range(3):
@@ -61,7 +61,7 @@ def make_num_sites_dict(mutation_rates=None, include_stop_codons=False):
                     if codon[i] == nuc:
                         # no need to spend time calculating the same codon
                         continue
-                    if (0, 0, 0, 0) in edited_codon or (not include_stop_codons and AA == '*'): 
+                    if (0, 0, 0, 0) in edited_codon or (not include_stop_codons and AA == '*'):
                         # mutations to stop codons are optionally ignored.
                         # mutations to Ns (or codons that contain N) should be ignored.
                         continue
@@ -70,8 +70,8 @@ def make_num_sites_dict(mutation_rates=None, include_stop_codons=False):
                     else:
                         mutation_likelihood = 1/3
                     new_AA = one_hot_translate[edited_codon]
-                    # if include_stop_codons and new_AA == '*':
-                    #     continue
+                    if not include_stop_codons and new_AA == '*':  # if mutation creates stop codon, ignore (if specified)
+                        continue
                     if AA == new_AA:  # if synon
                         numsitespercodon[flatten_codon(codon)][i]['s'] += mutation_likelihood
                     else:
@@ -95,8 +95,8 @@ def make_synon_nonsynon_site_dict(num_sites_dict, include_stop_codons=False):
         [AAA, AAC, AAG, AAT]]
        That way, multiplying array by the SNP frequencies will yield the number of sites in that codon
        '''
-    synonSiteCount = {flatten_codon(codon): np.zeros((3,4), dtype=np.float64) for codon in all_codons}
-    nonSynonSiteCount = {flatten_codon(codon): np.zeros((3,4), dtype=np.float64) for codon in all_codons}
+    synonSiteCount = {flatten_codon(codon): np.zeros((3, 4), dtype=np.float64) for codon in all_codons}
+    nonSynonSiteCount = {flatten_codon(codon): np.zeros((3, 4), dtype=np.float64) for codon in all_codons}
     for codon in one_hot_translate.keys():
         if one_hot_translate[codon] == '*' and not include_stop_codons:
             continue
@@ -106,8 +106,8 @@ def make_synon_nonsynon_site_dict(num_sites_dict, include_stop_codons=False):
                     if (0, 0, 0, 0) in (refnuc,) + (nuc,):  # Zero out codons with N for synon/nonsynon math
                         continue
                     tmpcodon = codon[:i] + (nuc,) + codon[i + 1:]
-                    synonSiteCount[flatten_codon(codon)][i,j] = num_sites_dict[flatten_codon(tmpcodon)][i]['s']
-                    nonSynonSiteCount[flatten_codon(codon)][i,j] = num_sites_dict[flatten_codon(tmpcodon)][i]['n']
+                    synonSiteCount[flatten_codon(codon)][i, j] = num_sites_dict[flatten_codon(tmpcodon)][i]['s']
+                    nonSynonSiteCount[flatten_codon(codon)][i, j] = num_sites_dict[flatten_codon(tmpcodon)][i]['n']
     return synonSiteCount, nonSynonSiteCount
 
 
@@ -196,5 +196,6 @@ def translate_codons(sample_consensus_seqs, codon, filters, synonSiteCount, nonS
     nss[ixs[0], ixs[1], :, :] = nonSynonSiteCount[codon][np.newaxis, np.newaxis, :, :]
     ss[ixs[0], ixs[1], :, :] = synonSiteCount[codon][np.newaxis, np.newaxis, :, :]
     return ns, s, nss, ss
+
 
 synonPiTranslate, nonSynonPiTranslate = generate_codon_synon_mutation_filters()

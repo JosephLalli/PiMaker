@@ -1,8 +1,7 @@
 import numpy as np
 import pandas as pd
 import allel
-# from Bio import SeqIO
-# from Bio.SeqIO.FastaIO import SimpleFastaParser
+import copy
 import pysam
 import pathlib
 import gzip
@@ -10,47 +9,25 @@ import contextlib
 from collections import OrderedDict
 from tqdm import tqdm
 import os
-from timeit import default_timer as timer
 
-
-def timeit(func, n=10, return_result=False, args=list(), kwargs=dict()):
-    def wrapper(func, args=list(), kwargs=dict()):  # don't return results; prevents calcing time dealing w/ memory allocation of results
-        r = func(*args, **kwargs)
-        if hasattr(r, '__next__'):
-            r = list(r)
-        if return_result:
-            return r
-    start = timer()
-    r = [wrapper(func, args, kwargs) for _ in range(n)]
-    end = timer()
-    print(str(round((end - start) * 1000 / n, 5)) + 'ms')
-    if return_result:
-        return r
-
-
-@contextlib.contextmanager
-def safe_open(filepath, rw):
-    if '.gz' in pathlib.Path(filepath).suffixes:
-        file = gzip.open(filepath, rw+'t')
-    else:
-        file = open(filepath, rw)
-    try:
-        yield file
-    finally:
-        file.close()
-
-
-bcf_file = '/mnt/d/projects/pimaker/test_data/influenza/Orchards_H3N2_a.bcf.gz'
-vcf_file = '/mnt/d/projects/pimaker/test_data/influenza/Orchards_H3N2_a.vcf'
-ref_fasta = '/mnt/d/projects/pimaker/test_data/influenza/A_Singapore_INFIMH-16-0019_2016.fasta'
-gtf_file = '/mnt/d/projects/pimaker/test_data/influenza/A_Singapore_INFIMH-16-0019_2016_antigenic_w_glycosylation.gtf'
-mutation_rates_file = '/mnt/d/projects/pimaker/test_data/influenza/test_data/influenza/pauley_mutation_rates.tsv'
 nucs = 'ACGTN'
 nuc_dict = {'A': 0, 'C': 1, 'G': 2, 'T': 3, 'N': 4}
 nuc_array = np.concatenate((np.eye(4, dtype=np.int16), np.zeros((1, 4), dtype=np.int16)))
 array_dict = {n: a for n, a in zip(nucs, nuc_array)}
 nuc_tuple = tuple(map(tuple, nuc_array))
 tuple_dict = {nucs[i]: t for i, t in enumerate(nuc_tuple)}
+
+
+@contextlib.contextmanager
+def safe_open(filepath, rw):
+    if '.gz' in pathlib.Path(filepath).suffixes:
+        file = gzip.open(filepath, rw + 't')
+    else:
+        file = open(filepath, rw)
+    try:
+        yield file
+    finally:
+        file.close()
 
 
 def get_num_var(vcf_file, contig=False):
@@ -71,31 +48,9 @@ def get_sample_list(vcf_file):
         f'bcftools query -l {vcf_file}').read()
     return retval.strip().split('\n')
 
-# def get_sample_list(vcf_file):
-#     vcf = pysam.VariantFile(vcf_file, threads=os.cpu_count() / 2)
-#     test_record = next(vcf)
-#     sample_list = list(test_record.samples.keys())
-#     return sample_list
-
-# x = timeit(create_combined_reference_Array, n=1, return_result=True, args=[ref_fasta])
-
-def timeit(func, n=1, return_result=False, args=list(), kwargs=dict()):
-    def wrapper(func, args=list()):  # don't return results; prevents calcing time dealing w/ memory allocation of results
-        r = func(*args, **kwargs)
-        if hasattr(r, '__iter__'):
-            r = list(r)
-        if return_result:
-            return r
-    
-    start=timer()
-    r = [wrapper(func, args) for _ in range(n)]
-    end=timer()
-    print(str(round((end-start)*1000/n, 5))+'ms')
-    if return_result:
-        return r
 
 def SimpleFastaParser(handle):
-    """Shamelessly stolen from Bio.SeqIO
+    """Shamelessly stolen from Bio.SeqIO.
     Iterate over Fasta records as string tuples.
     Arguments:
      - handle - input stream opened in text mode
@@ -136,20 +91,6 @@ def SimpleFastaParser(handle):
     yield title, "".join(lines).replace(" ", "").replace("\r", "")
 
 
-# @numba.njit(parallel=True)
-# def do_the_thing(lines):
-#     seq_id = ''
-#     sequence, line = '', ''
-#     for line in lines:
-#         if line.startswith('>'):
-#             if len(sequence) != 0: # if not the first line
-#                 yield seq_id, sequence
-#             sequence = ''
-#             seq_id = line[1:].split(' ')[0]
-#         elif line != '\n':
-#             sequence += line.replace(" ", "").replace("\r", "").strip()
-#     yield seq_id, sequence
-
 def format_sample_cts(s, one_hots):
     if s['AD'] is None:
         s['AD'] = 0
@@ -159,16 +100,16 @@ def format_sample_cts(s, one_hots):
         if s['DP'] is None:
             return np.zeros(4, dtype=np.uint16)
         else:
-            cts = np.array((s['DP']-s['AD'], s['AD']))[:, np.newaxis]
+            cts = np.array((s['DP'] - s['AD'], s['AD']))[:, np.newaxis]
             alleles = s.allele_indices
-            if (len(alleles) == 1 )or (alleles[0] == alleles[1]):  # if monoallelic
+            if (len(alleles) == 1) or (alleles[0] == alleles[1]):  # if monoallelic
                 alleles = alleles[0:1]
                 cts = cts[alleles[0]:alleles[0] + 1, :]
             elif alleles[0] != 0:
                 alleles = (0,) + alleles
             s_hots = one_hots[alleles, :]
             return (cts * s_hots).sum(0)
-    
+
     if s['RD'] is None:
         return np.zeros(4, dtype=np.uint16)
     else:
@@ -185,11 +126,11 @@ def format_sample_cts(s, one_hots):
 
 def is_snp(r):
     '''determines if a pysam variant record is a snp or not'''
-    return (len(r.ref) == 1) and any([len(a)==1 for a in r.alts]) and (r.ref is not None)
+    return (len(r.ref) == 1) and any([len(a) == 1 for a in r.alts]) and (r.ref is not None)
 
 
 def read_fasta_as_idx(path):
-    with safe_open(ref_fasta, 'r') as fasta:
+    with safe_open(path, 'r') as fasta:
         refseq = [(id.split(' ')[0], seq) for id, seq in SimpleFastaParser(fasta)]
     return refseq
 
@@ -241,26 +182,18 @@ def create_combined_reference_Array(ref_fasta):
 
 
 def vcf_to_numpy_array_read_cts(vcf_file, contig_coords, region=None, maf=0):
-    # '''as currently coded, errors if region is not specified to at least one contig'''
-    # if region is None:
-    #     raise NotImplementedError('Currently we cannot read more than one contig\'s mutations at once. Apologies. Please specify the contig in the region parameter.')
     better_names_for_vcf_fields = {'calldata/AD': 'AD', 'calldata/DP': 'DP', 'calldata/RD': 'RD',
-                                    'variants/ALT': 'alt', 'variants/CHROM': 'contig',
-                                    'variants/POS': 'pos', 'variants/REF': 'ref'}
+                                   'variants/ALT': 'alt', 'variants/CHROM': 'contig',
+                                   'variants/POS': 'pos', 'variants/REF': 'ref'}
     fields_to_extract = list(better_names_for_vcf_fields.keys()) + ['samples']
     vcf = allel.read_vcf(vcf_file, fields=fields_to_extract, rename_fields=better_names_for_vcf_fields, region=region)
-    # if vcf is None:
-    #     print ('allel returned a vcf of none!')
-    #     print (vcf_file, region)
-    #     print (vcf.keys())
-    #     print (vcf['pos'])
-    #     raise TypeError
-    # pos is 1-indexed in allel
+    vcf['pos'] -= 1  # pos is 1-indexed in allel
     if region is None:
-        vcf['contig']
+        vcf['pos'] = np.array([pos + contig_coords[contig][0] for contig, pos in zip(vcf['contig'], vcf['pos'])])
+        og_var_pos = vcf['pos']
     else:
-        og_var_pos = vcf['pos'] + contig_coords[0] - 1  # var_pos = [pos + contig_starts[contig] for pos, contig in zip(vcf['pos'], vcf['contig'])]
-        var_pos, var_pos_ind = np.unique(og_var_pos, return_index=True)
+        og_var_pos = vcf['pos'] + contig_coords[0]
+    var_pos, var_pos_ind = np.unique(og_var_pos, return_index=True)
     if len(var_pos) < len(og_var_pos):  # if multiallelic sites are already split up, I need to concat them back together
         vcf['ref'] = vcf['ref'][var_pos_ind]
         vcf['RD'] = merge_split_multiallelics(vcf['RD'], og_var_pos, action='sum')
@@ -276,7 +209,7 @@ def vcf_to_numpy_array_read_cts(vcf_file, contig_coords, region=None, maf=0):
     for i, alts in enumerate(vcf['alt'].T):
         read_cts += convert_to_onehot(alts, default_idx=tuple_dict['N'])[np.newaxis, :, :] * vcf['AD'][:, :, i:(i + 1)]
     read_cts = np.where(read_cts < maf * read_cts.sum(2, keepdims=True), 0, read_cts)
-    read_cts = read_cts.astype(np.uint16)
+    read_cts = read_cts.astype(np.uint32)
     var_pos = var_pos.astype(np.uint64)
     return read_cts, var_pos
 
@@ -287,10 +220,10 @@ def merge_split_multiallelics(values, index, action=None):
     if action == 'sum':
         return values_df.apply(lambda x: x[x.columns[1:]].sum()).values
     elif action == 'reshape counts':
-        df_of_arrays = values_df.apply(lambda x: np.array([tuple(x[c])+(-1,)*(4-len(x[c])) for c in x.columns[1:]]))
+        df_of_arrays = values_df.apply(lambda x: np.array([tuple(x[c]) + (-1,) * (4 - len(x[c])) for c in x.columns[1:]]))
         return np.stack(df_of_arrays.values)
     elif action == 'reshape nucs':
-        values_df = values_df.apply(lambda x: pd.Series([tuple(x[0].values)+('',)*(3-len(x))][0]))
+        values_df = values_df.apply(lambda x: pd.Series([tuple(x[0].values) + ('',) * (3 - len(x))][0]))
         return values_df.values
     else:
         raise ValueError('merge_split_multiallelics requires a specified action to handle the merge')
@@ -312,54 +245,6 @@ def save_tmp_chunk_results(contig, chunk_id, chunk_sample_pi, chunk_gene_pi, chu
     chunk_sample_pi_df.to_csv(sample_filename)
     chunk_gene_pi_df.to_csv(gene_filename)
     return sample_filename, gene_filename, site_filename
-# from numba import vectorize, int16
-
-# timeit(vcf_to_numpy_array_read_cts, args=(vcf_file, refseqArray, contig_starts),n=2)
-
-# @vectorize([int16(int16, int16)])
-# def multiply_arrays(x, y):
-#     return x * y
-
-# @numba.njit(parallel=True)#([int16(int16, int16)])
-# def multiply_arrays(x, y):
-#     return x * y
-
-# def multiply_arrays(x,y):
-#     y = np.tile(y, np.ceil(np.array(x.shape)/np.array(y.shape)).astype(np.int8))
-#     return numba_mult(x,y)
-
-# @numba.jit(nopython=True, parallel=True)
-# def numba_mult(x,y):
-#     result = np.zeros((y.shape[0], y.shape[1], x.shape[2]), dtype=np.int16)
-#     r = result[:]
-#     for i in numba.prange(y.shape[0]):
-#         for j in numba.prange(y.shape[1]):
-#             for k in numba.prange(x.shape[2]):
-#                 if x[0,j,k] == 0:
-#                     pass#result[i,j,k] == np.int16(0)
-#                 else:
-#                     r[i,j,k] == y[i,j,0]
-#     return result
-# RD[RD == -1] = np.int16(0)
-# AD[AD == -1] = np.int16(0)
-# RD = RD.T[:,:,np.newaxis]
-# AD = AD.swapaxes(0,1)
-# ref = ref[np.newaxis,:,:]
-# q = nconeumba.typed.List()
-# for x in alts:
-#     q.append(x)#[x[np.newaxis, :, :].T for x in alts])
-# @numba.njit()
-# def set_up_read_cts(refs, alts_onehot, RD, AD):
-#     read_cts = refs * RD
-#     for i, alts in enumerate(alts_onehot):
-#         # alt_idx = convert_to_onehot(alts, default_idx = nucs.index('N'))
-#         read_cts += alts * AD[:,:,i:i+1]
-#     return read_cts
-# # @numba.njit
-# def get_varpos(pos, contig, contig_starts):
-#     var_pos = [pos+contig_starts[contig] for pos, contig in zip(pos, contig)]
-#     var_pos, var_pos_idx = np.unique(var_pos, return_index=True)
-#     return var_pos, var_pos_idx
 
 
 def vcf_to_numpy_array_pysam(vcf_file, refseqArray, contig_starts, maf=0, contig_coords=None):
@@ -376,38 +261,6 @@ def vcf_to_numpy_array_pysam(vcf_file, refseqArray, contig_starts, maf=0, contig
         read_cts[:, i, :] = np.stack([(np.array((s['RD'], s['AD']))[:, np.newaxis] * r_nuc_array[np.unique((0,) + tuple(a for a in s.allele_indices if a is not None)), :]).sum(0) for j, s in enumerate(r.samples.values())])
     return read_cts, var_pos
 
-# def vcf_to_numpy_array_cyvcf2(vcf_file, refseqArray, contig_starts, maf=0, contig_coords=None):
-# vcf = cyvcf2.VCF(vcf_file, threads = os.cpu_count()/2)
-# test_record = next(vcf)
-# sample_list = list(test_record.samples.keys())
-# vcf.reset()
-# num_records = get_num_var(vcf_file)
-# read_cts = np.zeros((len(sample_list), num_records, 4),dtype=np.int16)
-# var_pos = np.zeros(num_records)
-# for i, r in enumerate(vcf):
-#     var_pos = [r.pos + contig_starts[r.contig] for r in vcf]
-#         r_nuc_array = np.array([tuple_dict.get(x, (0,0,0,0)) for x in ((r.ref,)+r.alts)])
-#         read_cts[:,i,:] = np.stack([(np.array((s['RD'], s['AD']))[:,np.newaxis]*r_nuc_array[np.unique((0,)+tuple(a for a in s.allele_indices if a is not None)), :]).sum(0) for j,s in enumerate(r.samples.values())])
-#     return read_cts, var_pos
-
-    # var_pos = [r.pos + contig_starts[r.contig] for r in vcf]
-    # var_pos, var_pos_idx, inv_var = np.unique(var_pos, return_index=True, return_inverse=True)
-    # num_records = len(var_pos)
-    # vcf.reset()
-    # read_cts = np.zeros(shape = (len(sample_list), num_records, 4))
-    # for i, r in enumerate(vcf):
-    #     assert len(r.alts) == 1
-    #     if len(r.ref) != len(r.alts[0]): #if indel
-    #         continue
-    #     r_pos = inv_var[i]
-    #     r_cts = np.stack([array_dict[r.ref]*samp_record['RD'] + array_dict[r.alts[0]]*samp_record['AD'] for samp_record in r.samples.values()])
-    #     read_cts[:, r_pos, :] += r_cts
-
-    # # fill in samples where a variant wasn't called in that sample
-    # read_cts = np.where(read_cts.sum(2, keepdims=True)==0, refseqArray[:,var_pos,:], read_cts)
-    # read_cts[read_cts/read_cts.sum(2, keepdims=True) < maf] = 0
-    # return read_cts, sample_list, var_pos, var_pos_idx
-
 
 def combine_contigs(refseq):
     '''Combine contig sequences into one string, annotate contig locations within concatenated genome'''
@@ -421,6 +274,7 @@ def combine_contigs(refseq):
         runningtally += len(seq)
     refseqArray = np.array(list(concatrefseq))
     return refseqArray, contigStarts, contigCoords
+
 
 def parseGTF(gtffile, contig_coords=None):
     '''given file location of gtf, and dictionary of starting locations
@@ -440,8 +294,8 @@ def parseGTF(gtffile, contig_coords=None):
     for line in gtf:
         line = line.replace("/", "_")
         mandatory_items = line.split("\t")
-        custom_items = [item.replace("\"", '').strip() for item in mandatory_items[-1].split(';') if not item.isspace()]
-        custom_items = [tuple(item.split(' ')) for item in custom_items if item[0] != '#']
+        custom_items = [item.replace("\"", '').strip() for item in mandatory_items[-1].split(';') if not item.isspace() and len(item) != 0]
+        custom_items = [tuple(item.split(' ')) for item in custom_items if (item != ('',)) and (item[0] != '#')]
         custom_items = {k: v for k, v in custom_items}
         mandatory_items = mandatory_items[:-1]
         contig_name = mandatory_items[0]
@@ -449,8 +303,8 @@ def parseGTF(gtffile, contig_coords=None):
             gene_coords[contig_name] = OrderedDict()
         annotation_type = mandatory_items[2]
         start = int(mandatory_items[3]) - 1  # adding the -1 here to convert to 0 indexing
-        stop = int(mandatory_items[4])  # not adding -1 because, while GTF is 1-indexed, its inclusive-ended. Converting to standard 0-indexing would mean 1-10 in GTF is equivelent to [0:10]
-        if contig_coords is not None:
+        stop = int(mandatory_items[4])  # not adding -1 because, while GTF is 1-indexed, its inclusive-ended.
+        if contig_coords is not None:   # Converting to standard 0-indexing would mean 1-10 in GTF is equivelent to [0:10]
             start += contig_coords[contig_name]
             stop += contig_coords[contig_name]
         strand = mandatory_items[6]
@@ -460,9 +314,10 @@ def parseGTF(gtffile, contig_coords=None):
             if custom_items['transcript_id'] not in gene_coords[contig_name].keys():
                 gene_coords[contig_name][custom_items['transcript_id']] = tuple()
             transcript_to_gene_id[custom_items['transcript_id']] = custom_items['gene_id']
-            id_to_symbol[custom_items['gene_id']] = custom_items['gene_symbol']
-            id_to_symbol[custom_items['transcript_id']] = custom_items['transcript_symbol']
-            gene_coords[contig_name][custom_items['transcript_id']]+=((start, stop),)
+            id_to_symbol[custom_items['gene_id']] = custom_items['gene_id']
+            id_to_symbol[custom_items['transcript_id']] = custom_items['transcript_id']
+            gene_coords[contig_name][custom_items['transcript_id']] += ((start, stop),)
+
     for chrom in gene_coords.keys():
         gene_coords[chrom] = OrderedDict(sorted(gene_coords[chrom].items(), key=lambda item: min(item[1][0][0], item[1][-1][-1])))
     return gene_coords, transcript_to_gene_id, id_to_symbol
@@ -472,8 +327,6 @@ def retrieve_genes_in_region(start, stop, gene_coords, contig_start):
     '''record genes present in region.
        while recording, if pos is in middle of gene, adjust it'''
     genes = OrderedDict()
-    # start -= contig_start
-    # stop -= contig_start
     for gene, coords in gene_coords.items():
         gene_start = min(coords[0][0], coords[-1][-1])
         gene_end = max(coords[0][0], coords[-1][-1])
@@ -515,17 +368,17 @@ def pool_to_numpy(poolfile):
     pool = pd.read_csv(poolfile, sep='\t')
     sample_list = pool.columns[2:]
     var_pos = pool.Position.astype(int)
-    
+
     def col_to_nump(column):
         return np.stack(column.str.split(':').values).astype(int)
 
     read_cts = np.stack([col_to_nump(pool[sample])[:, :-2] for sample in sample_list])
     return read_cts, var_pos, sample_list
 
-import copy
+
 def vcf_to_sync(vcf_file, sync_file=None):
     if sync_file is None:
-        sync_file = vcf_file.replace('.vcf', '.sync').replace('.bcf','.sync').replace('.gz','')
+        sync_file = vcf_file.replace('.vcf', '.sync').replace('.bcf', '.sync').replace('.gz', '')
     vcf = pysam.VariantFile(vcf_file, threads=os.cpu_count() / 2)
     test_record = next(vcf)
     sample_list = list(test_record.samples.keys())
@@ -542,15 +395,13 @@ def vcf_to_sync(vcf_file, sync_file=None):
             var_pos[r.contig] = np.zeros(num_records[r.contig])
             ref[r.contig] = ''
             read_cts[r.contig] = np.zeros((len(sample_list), num_records[r.contig], 6), dtype=np.int16)
-            contig_adjust = i # assumes vcf sorted
-            
-        i = i-contig_adjust
+            contig_adjust = i  # assumes vcf sorted
+        i = i - contig_adjust
         contigs.append(r.chrom)
         var_pos[r.contig][i] = r.pos
         r_nuc_array = np.array([tuple_dict.get(x, (0, 0, 0, 0)) + (0, 0) for x in ((r.ref,) + r.alts)])
         read_cts[r.contig][:, i, :] = np.stack([(np.array((s['RD'], s['AD']))[:, np.newaxis] * r_nuc_array[np.unique((0,) + tuple(a for a in s.allele_indices if a is not None)), :]).sum(0) for j, s in enumerate(r.samples.values())])
         ref[r.contig] += r.ref
-        
 
     # Convert ACGT to ATCG because popoolation is silly
     for contig in tqdm(read_cts.keys()):
@@ -566,7 +417,7 @@ def vcf_to_sync(vcf_file, sync_file=None):
             ref[contig] = ''.join(list(np.array(list(ref[contig]))[var_pos_ind]))
             read_cts[contig] = np.stack([merge_split_multiallelics(read_cts[contig][:, :, i].T, og_var_pos, action='sum').T for i in range(6)], axis=2)
 
-        pool_fmt_list = [np.array2string(read_cts[contig][i,:,:].astype(int), separator=':', threshold=num_records[contig]*2, edgeitems=num_records[contig]*2).replace(' ','').replace('[','').replace(']','').split(':\n') for i in range(len(sample_list))]
+        pool_fmt_list = [np.array2string(read_cts[contig][i, :, :].astype(int), separator=':', threshold=num_records[contig] * 2, edgeitems=num_records[contig] * 2).replace(' ', '').replace('[', '').replace(']', '').split(':\n') for i in range(len(sample_list))]
         pool_fmt_cts = pd.DataFrame(pool_fmt_list).T
         pool_fmt_cts.columns = sample_list
         pool_fmt_cts['Contig'] = contig

@@ -339,28 +339,28 @@ def calcPerSitePi(piCalcs):
 
 def combine_contigs(refseq):
     #Combine contig sequences into one string, annotate contig locations within concatenated genome
-    concatrefseq = "".join([str(seq.seq) for seq in refseq])
+    concatrefseq = "".join([str(seq[1]) for seq in refseq])
     contigStarts = dict()
     contigCoords = dict()
     runningtally = 0
-    for seq in refseq:
-        contigStarts[seq.id] = runningtally
-        contigCoords[seq.id.split('_')[-1]] = (runningtally, runningtally+len(seq))
+    for contig, seq in refseq:
+        contigStarts[contig] = runningtally
+        contigCoords[contig] = (runningtally, runningtally+len(seq))
         runningtally += len(seq)
     refseqArray = np.array(list(concatrefseq))
     return refseqArray, contigStarts, contigCoords
 
-def masksFromCodingCoordinates(codingCoords, contigStarts,refSeqArray):
+def masksFromCodingCoordinates(codingCoords, contigCoords, refSeqArray):
     codingMasks = dict()
-    for contig, startLoc in contigStarts.items():
+    for contig, (startLoc, end) in contigCoords.items():
         for gene, coords in codingCoords[contig].items():
-            codingMasks[gene] = np.full(refSeqArray.shape[1], False)
+            codingMasks[gene] = np.full(refSeqArray.shape, False)
             for coord in coords:
                 codingMasks[gene][coord[0]+startLoc:coord[1]+startLoc] = True
     return codingMasks
 
 
-def parseGTF(gtffile, contigLocations):
+def parseGTF(gtffile):
     '''given file location of gtf, and dictionary of starting locations
        of each chrom in a concatenated sequence, return dictionary of
        {gene product : numpy filter for concatenated sequence'''
@@ -392,7 +392,7 @@ def parseGTF(gtffile, contigLocations):
 
     return coding_regions
 
-def getRefSeqs(vcfDF, refSeq):
+def getRefSeqs(read_cts, refSeq):
     '''given dataframe of VCF with variable sites and numpy refseq array,
     returns numpy array of refseqs with sample key'''
 
@@ -411,7 +411,131 @@ def getRefSeqs(vcfDF, refSeq):
                 continue
     return refSeqs, samples
 
-refseqArray, contigStarts, contigCoords, readCts, samplelist, poslist
+# refseqArray, contigStarts, contigCoords, readCts, samplelist, poslist
+from pm_io import safe_open, SimpleFastaParser
+def read_fasta(path):
+    with safe_open(path, 'r') as fasta:
+        refseq = [(id.split(' ')[0], seq) for id, seq in SimpleFastaParser(fasta)]
+    return refseq
+
+def calc_small_genome_pi(readCts, sampleKey, poslist, ref_file, contigCoords, gtf):
+
+    def calcPerSamplePi(sitePi, length=None):
+        '''given numpy array of pi values, returns average per sample pi'''
+        if length is None:
+            length = sitePi.shape[1]
+        return np.nansum(sitePi,axis=1)/length
+    refseq = read_fasta(ref_file)
+    refSeqArray, contigStarts, contigCoords = combine_contigs(refseq)
+    refSeqArrays, sampleKey = getRefSeqs(readCts, refseqArray)
+    piMath = performPiCalc(readCts)
+    perSitePi = calcPerSitePi(piMath)
+    perSitePi = np.nan_to_num(perSitePi)
+    perSitePiDF = pd.DataFrame(perSitePi, index=sampleKey).dropna(how='all',axis=1)
+    # perSitePiDF.columns = poslist
+    perSitePiDF = perSitePiDF.stack().reset_index().rename(columns={'level_0':'sampleID','level_1':'inConcatPos',0:'pi'})
+
+    perSamplePi = calcPerSamplePi(perSitePi)
+    perSamplePiDF = pd.DataFrame(perSamplePi, index=sampleKey, columns=['pi_sample'])
+
+
+    #contig Pi
+    perContigPiDF = pd.DataFrame(index=sampleKey)
+
+    for contig, coords in contigCoords.items():
+        perContigPiDF[contig] = pd.Series(calcPerSamplePi(perSitePi[:,coords[0]:coords[1]], length = coords[1]-coords[0]), index=sampleKey)
+    perContigPiDF = perContigPiDF.stack().reset_index().rename(columns={'level_0':'sampleID','level_1':'contig',0:'pi_contig'})
+
+    #coding region Pi/PiN/PiS
+    codingCoords = parseGTF(gtf)
+    codingMasks = masksFromCodingCoordinates(codingCoords, contigCoords, refSeqArray)
+    overlaps = calc_overlaps(codingCoords)
+
+    genePis = pd.DataFrame(index=sampleKey)
+    genePiN = pd.DataFrame(index=sampleKey)
+    genePiS = pd.DataFrame(index=sampleKey)
+    genePiN_sites = pd.DataFrame(index=sampleKey)
+    genePiS_sites = pd.DataFrame(index=sampleKey)
+    sample_piN_piS = pd.DataFrame(index=sampleKey, columns=['piN_sum','piN_sites','piS_sum','piS_sites']).fillna(0)
+
+
+    for gene, mask in codingMasks.items():
+        # print ((readCts*mask[np.newaxis, :, np.newaxis]).sum())
+        geneSeqMaskedArray = np.ma.array(refseqArray, mask=np.broadcast_to(abs(mask-1)[np.newaxis, :, np.newaxis], refSeqArrays.shape))
+        geneSeqArray = geneSeqMaskedArray.compressed().reshape(len(sampleKey),-1)
+
+        synonFilter, nonSynonFilter, synonSiteFilter, nonSynonSiteFilter = generateSynonFilters(geneSeqArray)
+
+        gene_readCts = np.ma.array(readCts, mask=np.broadcast_to(abs(mask-1)[np.newaxis,:,np.newaxis], readCts.shape))
+        gene_readCts = gene_readCts.compressed().reshape(synonSiteFilter.shape)
+
+        SNP_freqs = read_cts_into_SNP_freqs(gene_readCts, geneSeqArray)
+        # remove start codon from math
+        if SNPGenie_1_rules:
+            nonSynonSiteFilter[:,0:3,:] = 1
+            synonSiteFilter[:,0:3,:] = 0
+
+        nonsynon_sites = (SNP_freqs*nonSynonSiteFilter).sum(axis=2)
+        synon_sites = (SNP_freqs*synonSiteFilter).sum(axis=2)
+
+        piMathMaskedArray = np.ma.array(piMath, mask=np.broadcast_to(abs(mask-1)[np.newaxis,:,np.newaxis], piMath.shape))
+        genePiMathArray = piMathMaskedArray.compressed().reshape(synonFilter.shape)
+        genePerSitePi = calcPerSitePi(genePiMathArray)
+        nonSynonPerSitePi = calcPerSitePi(genePiMathArray*nonSynonFilter)
+        synonPerSitePi = calcPerSitePi(genePiMathArray*synonFilter)
+        genePis[gene] = calcPerSamplePi(genePerSitePi)
+        genePiN[gene] = calcPerSamplePi(nonSynonPerSitePi, length=nonsynon_sites.sum(axis=1))
+        genePiS[gene] = calcPerSamplePi(synonPerSitePi, length=synon_sites.sum(axis=1))
+        genePiN_sites[gene] = nonsynon_sites.sum(axis=1)
+        genePiS_sites[gene] = synon_sites.sum(axis=1)
+
+        #And now do the same thing w/o overlapping regions to accurately determine whole-sample piN/piS
+        if gene in overlaps.keys(): # Still best done w/ new metho
+            synonFilter_no_overlap = remove_overlap_regions(overlaps, synonFilter)
+            nonSynonFilter_no_overlap = remove_overlap_regions(overlaps, nonSynonFilter)
+            contig = [contig for contig in codingCoords.keys() if gene in codingCoords[contig]][0]
+            keepers = get_nonoverlapping_in_gene_locations(contig, gene, codingCoords)
+
+            sample_piN_piS['piS_sites'] += synon_sites[:, keepers].sum(axis=1)
+            sample_piN_piS['piN_sites'] += nonsynon_sites[:, keepers].sum(axis=1)
+            nonSynonPerSitePi_no_overlap = calcPerSitePi(genePiMathArray*nonSynonFilter_no_overlap)
+            synonPerSitePi_no_overlap = calcPerSitePi(genePiMathArray*synonFilter_no_overlap)
+
+            sample_piN_piS['piS_sum'] += calcPerSamplePi(synonPerSitePi_no_overlap, length=1)
+            sample_piN_piS['piN_sum'] += calcPerSamplePi(nonSynonPerSitePi_no_overlap, length=1)
+        else:
+            if gene not in ['PA-X', 'PB1-F2', 'HA_antigenic', 'HA_nonantigenic']:
+                sample_piN_piS['piS_sites'] += synon_sites.sum(axis=1)
+                sample_piN_piS['piN_sites'] += nonsynon_sites.sum(axis=1)
+                sample_piN_piS['piS_sum'] += calcPerSamplePi(synonPerSitePi, length=1)
+                sample_piN_piS['piN_sum'] += calcPerSamplePi(nonSynonPerSitePi, length=1)
+
+
+    sample_piN_piS['piN_sample'] = sample_piN_piS['piN_sum']/sample_piN_piS['piN_sites']
+    sample_piN_piS['piS_sample'] = sample_piN_piS['piS_sum']/sample_piN_piS['piS_sites']
+    perSamplePiDF = perSamplePiDF.join(sample_piN_piS)
+
+    genePis = genePis.stack().reset_index().rename(columns={'level_0':'sampleID','level_1':'product',0:'pi'})
+    genePiN = genePiN.stack().reset_index().rename(columns={'level_0':'sampleID','level_1':'product',0:'pi'})
+    genePiS = genePiS.stack().reset_index().rename(columns={'level_0':'sampleID','level_1':'product',0:'pi'})
+    genePiN_sites = genePiN_sites.stack().reset_index().rename(columns={'level_0':'sampleID','level_1':'product',0:'sites'})
+    genePiS_sites = genePiS_sites.stack().reset_index().rename(columns={'level_0':'sampleID','level_1':'product',0:'sites'})
+    genePiN = genePiN.merge(genePiN_sites, on=['sampleID','product'], how='left')
+    genePiS = genePiS.merge(genePiS_sites, on=['sampleID','product'], how='left')
+
+    genePis['type'] = 'pi'
+    genePiN['type'] = 'piN'
+    genePiS['type'] = 'piS'
+
+    genePis = genePis.append(genePiN).append(genePiS)
+
+    # Finally, just because somehow it hasn't happened yet in this code,
+    # I'm going to make sure the contig is attached to the gene DF
+
+    contigDict = {gene:contig.split('_')[-1] for contig in codingCoords.keys() for gene in codingCoords[contig]}
+    genePis['contig'] = genePis['product'].map(contigDict)
+
+    return perSamplePiDF, perContigPiDF, genePis, perSitePiDF
 
 def calcPi(vcfDF, gtf=None, length = None, refseq = None, maf = 0.01, rollingWindow=None, synon_nonsynon=False): 
     # Main body of program
@@ -427,13 +551,13 @@ def calcPi(vcfDF, gtf=None, length = None, refseq = None, maf = 0.01, rollingWin
     # piSNPs['pos'] = piSNPs.pos-1 #Apparantly this is taken straight from vcf, which is 1-indexed
 
     # piSNPs = piSNPs.rename(columns={'pos':'inContigPos'})
-    piSNPs['refAlleleFreq'] = piSNPs.RD/(piSNPs.RD+piSNPs.AD)
+    # piSNPs['refAlleleFreq'] = piSNPs.RD/(piSNPs.RD+piSNPs.AD)
 
     # piSNPs = piSNPs.loc[(piSNPs.refAlleleFreq >= maf)&(piSNPs.refAlleleFreq <= (1-maf))]
     # Adjust SNPs to remove reads that contribute to minor variants below maf cutoff:
-    piSNPs.loc[piSNPs.refAlleleFreq < maf, 'RD'] = 0
-    piSNPs.loc[piSNPs.refAlleleFreq > (1-maf), 'AD'] = 0
-    piSNPs['pos'] = piSNPs['product'] + ' '+ piSNPs['inGenePos'].astype(str)
+    # piSNPs.loc[piSNPs.refAlleleFreq < maf, 'RD'] = 0
+    # piSNPs.loc[piSNPs.refAlleleFreq > (1-maf), 'AD'] = 0
+    # piSNPs['pos'] = piSNPs['product'] + ' '+ piSNPs['inGenePos'].astype(str)
     piSNPs[['sampleID','contig','pos','ref_nuc','alt_nuc','RD','AD','AAtype','inContigPos','refAlleleFreq']].set_index(['sampleID','pos'])
     piSNPs['inConcatPos'] = piSNPs.inContigPos
 

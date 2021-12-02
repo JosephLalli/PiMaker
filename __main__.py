@@ -1,29 +1,34 @@
+#!/usr/bin/env python
+# coding: utf-8
+
 import argparse
 import shutil
 import os
 import sys
 from version import __version__
+from pimaker import calcPi
+from timeit import default_timer as timer
 
 
 def get_parser():
     parser = argparse.ArgumentParser(description='Tool to calculate diversity statistics from sequenced populations.',
                                      formatter_class=MyHelpFormatter, add_help=False)
     parser.add_argument('--version', action='version', version=f'Pimaker {__version__}',
-                        help= 'Show PiMaker\'s version number and exit')
+                        help='Show PiMaker\'s version number and exit')
     parser.add_argument('-h', '--help', action='help',
                         help='Show this help message and exit')
     parser.add_argument('-v', '--vcf', required=True, type=str,
                         help='''Combined VCF file containing called mutations from all sequencing runs''')
     parser.add_argument('-r', '--ref_fasta', required=True, type=str,
                         help='''Reference fasta file''')
-    parser.add_argument('-g', '--gtf',required=True, type=str,
+    parser.add_argument('-g', '--gtf', required=True, type=str,
                         help='''GTF file containing locations of all genes and transcripts of interest in the
                                 reference fasta file''')
-    parser.add_argument('-o', '--output',required=True, type=str, default = 'pimaker/result',
-                        help='''Location of output files. Sample, Gene, and Site specific results will each have 
-                        this prefix + \'_gene.csv\', etc. attached. defaults to \'pimaker/result\'''')                          
+    parser.add_argument('-o', '--output', required=True, type=str, default='pimaker/result',
+                        help='''Location of output files. Sample, Gene, and Site specific results will each have
+                        this prefix + \'_gene.csv\', etc. attached. defaults to \'pimaker/result\'''')
     parser.add_argument('--maf', type=float, default=0.0,
-                        help='''Minimum intra-sample frequency of variants to be considered when calculating 
+                        help='''Minimum intra-sample frequency of variants to be considered when calculating
                                 diversity''')
     parser.add_argument('--mutation_rates', type=str, default=None,
                         help='''Location of csv file containing empirically defined mutation rates. In the
@@ -31,25 +36,20 @@ def get_parser():
                                 likely to occur as in Nei & Gojobori, 1986''')
     parser.add_argument('--rolling_window', type=int, default=0,
                         help='''How wide should the rolling window be for a rolling window analysis of pi/piN/piS''')
-    parser.add_argument('--pi_only', type=bool, default=False,
+    parser.add_argument('--pi_only', action='store_true',
                         help='''Most of the processing time for this script is spent on calculating synonymous
                                 and nonsynonymous-specific mutations. Use this flag to skip this analysis and just
                                 calculate pi''')
-    parser.add_argument('--small_genome_mode', type=bool, default=False,
-                        help='''Depending on the size of your organism's genome, you may be able to simply
-                                run everything in one chunk. This is the original pimaker algorithm: very fast,
-                                very memory intensive. Best used for genomes of 100,000bp or less. Virologists,
-                                this is for you!''')
-    parser.add_argument('--include_stop_codons', type=bool, default=False,
+    parser.add_argument('--include_stop_codons', action='store_true',
                         help='''Nei and Gojobori 1986 assume that mutations to stop codons do not randomly.
                                 For some populations (especially rapidly adaptive populations), this assumption may
                                 not be valid''')
     parser.add_argument('--binsize', type=int,
-                        help='''Number of nucleotides to process at a time per thread. Higher binsize equals 
+                        help='''Number of nucleotides to process at a time per thread. Higher binsize equals
                                 faster performance with more memory usage. Lower binsize results in (slightly) slower
                                 performance with less memory usage. Default value is 1,000,000 nucleotides per analyzed
                                 chunk. Please adjust this first if you are encoutering errors due to high memory usage''', default=int(1e6))
-    parser.add_argument('-t', '--threads', type=int, default=os.cpu_count()-1,
+    parser.add_argument('-t', '--threads', type=int, default=os.cpu_count() - 1,
                         help='''Number of processes to use while performing calculations''')
     return parser
 
@@ -73,24 +73,11 @@ class MyHelpFormatter(argparse.HelpFormatter):
             help_text += ' (default: ' + str(action.default) + ')'
         return help_text
 
-# parameter checking
-# def check_subsample_args(args):
-#     if args.count < 2:
-#         sys.exit('\nError: --count cannot be less than 2')
-#     if args.count > 99:
-#         sys.exit('\nError: --count cannot be greater than 99')
-
-
-# def check_dotplot_args(args):
-#     if args.res < 500 or args.res > 10000:
-#         sys.exit('\nError: --res must be between 500 and 10000 (inclusive)')
-#     if args.kmer < 8 or args.kmer > 100:
-#         sys.exit('\nError: --res must be between 8 and 100 (inclusive)')
 
 def main(args=None):
     print('Welcome to PiMaker!')
     parser = get_parser()
-    arg_name_dict = {'vcf': 'vcf_file', 'gtf': 'gtf_file', 'threads': 'num_processes', 'output':'output_file_prefix'}
+    arg_name_dict = {'vcf': 'vcf_file', 'gtf': 'gtf_file', 'threads': 'num_processes', 'output': 'output_file_prefix'}
     if len(sys.argv[1:]) == 0:
         parser.print_help()
         parser.exit()
@@ -100,15 +87,12 @@ def main(args=None):
         args = {arg_name_dict.get(k, k): v for k, v in args.items()}
     print (args)
     print ('\n')
-
-    from timeit import default_timer as timer
     start = timer()
     with open('log.txt', 'a') as f:
         f.write(f'{start}\n')
-    from pimaker import calcPi
-    results = calcPi(**args)
+    calcPi(**args)
     stop = timer()
-    
+
     print(stop - start)
     with open('log.txt', 'a') as f:
         f.write(f'{stop}\n')
