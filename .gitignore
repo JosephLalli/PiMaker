@@ -60,3 +60,5 @@ small_genome_pimaker.py
 FST_formula.svg
 benchmarks.txt
 ST
+toy_vcf.tsv
+.gitignore

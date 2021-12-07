@@ -1,16 +1,23 @@
-#!/usr/bin/env python
-# coding: utf-8
+"""
+Functions to handle command line arguments.
+
+Args contains both a function to collect command line arguments (get_parser)
+and a class stolen from stackoverflow to format the help function output
+in a user-friendly manner.
+
+"""
 
 import argparse
 import shutil
 import os
-import sys
 from version import __version__
-from pimaker import calcPi
-from timeit import default_timer as timer
 
 
 def get_parser():
+    """
+    Creates argparse parser object. This object gets and organizes command line
+    arguments, and formats help text.
+    """
     parser = argparse.ArgumentParser(description='Tool to calculate diversity statistics from sequenced populations.',
                                      formatter_class=MyHelpFormatter, add_help=False)
     parser.add_argument('--version', action='version', version=f'Pimaker {__version__}',
@@ -44,9 +51,9 @@ def get_parser():
                         help='''Nei and Gojobori 1986 assume that mutations to stop codons do not randomly.
                                 For some populations (especially rapidly adaptive populations), this assumption may
                                 not be valid''')
-    parser.add_argument('--binsize', type=int,
-                        help='''Number of nucleotides to process at a time per thread. Higher binsize equals
-                                faster performance with more memory usage. Lower binsize results in (slightly) slower
+    parser.add_argument('--chunk_size', type=int,
+                        help='''Number of nucleotides to process at a time per thread. Higher chunk_size equals
+                                faster performance with more memory usage. Lower chunk_size results in (slightly) slower
                                 performance with less memory usage. Default value is 1,000,000 nucleotides per analyzed
                                 chunk. Please adjust this first if you are encoutering errors due to high memory usage''', default=int(1e6))
     parser.add_argument('-t', '--threads', type=int, default=os.cpu_count() - 1,
@@ -58,7 +65,7 @@ class MyHelpFormatter(argparse.HelpFormatter):
     """
     This is a custom formatter class for argparse. It allows for some custom formatting,
     in particular for the help texts with multiple options (like bridging mode and verbosity level).
-    http://stackoverflow.com/questions/3853722
+    Stolen from http://stackoverflow.com/questions/3853722.
     """
     def __init__(self, prog):
         terminal_width = shutil.get_terminal_size().columns
@@ -72,33 +79,3 @@ class MyHelpFormatter(argparse.HelpFormatter):
                 action.default is not None:
             help_text += ' (default: ' + str(action.default) + ')'
         return help_text
-
-
-def main(args=None):
-    print('Welcome to PiMaker!')
-    parser = get_parser()
-    arg_name_dict = {'vcf': 'vcf_file', 'gtf': 'gtf_file', 'threads': 'num_processes', 'output': 'output_file_prefix'}
-    if len(sys.argv[1:]) == 0:
-        parser.print_help()
-        parser.exit()
-    else:
-        args = parser.parse_args()
-        args = vars(args)
-        args = {arg_name_dict.get(k, k): v for k, v in args.items()}
-    print (args)
-    print ('\n')
-    start = timer()
-    with open('log.txt', 'a') as f:
-        f.write(f'{start}\n')
-    calcPi(**args)
-    stop = timer()
-
-    print(stop - start)
-    with open('log.txt', 'a') as f:
-        f.write(f'{stop}\n')
-        f.write(f'{stop - start}\n')
-    return None
-
-
-if __name__ == '__main__':
-    main()
