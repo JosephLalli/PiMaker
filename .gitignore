@@ -62,3 +62,10 @@ benchmarks.txt
 ST
 toy_vcf.tsv
 .gitignore
+old_pimaker.py
+benchmarks.txt
+docstrings.py
+note.py
+run_snpgenie.sh
+small_genome_pimaker.py
+tests.py
