@@ -15,6 +15,7 @@ import contextlib
 from collections import OrderedDict
 from tqdm import tqdm
 import os
+from pathlib import Path
 
 nucs = 'ACGTN'
 nuc_dict = {'A': 0, 'C': 1, 'G': 2, 'T': 3, 'N': 4}
@@ -36,6 +37,26 @@ def safe_open(filepath, rw):
         yield file
     finally:
         file.close()
+
+
+def add_number(folder_path):
+    assert not folder_path.exists()
+    try:
+        number_suffix = int(folder_path.stem.split('_')[-1])
+        base = ''.join(folder_path.stem.split('_')[:-1])
+        return folder_path.with_name(base + f'_{number_suffix + 1}' + folder_path.suffix)
+
+    except (IndexError, ValueError):
+        return folder_path.with_name(folder_path.stem + '_1' + folder_path.suffix)
+
+
+def create_folder(folder_path):
+    folder_path = Path(folder_path)
+    if folder_path.exists():
+        while folder_path.exists():
+            folder_path = add_number(folder_path)
+    folder_path.mkdir(parents=True)
+    return folder_path
 
 
 def setup_environment(output_file_prefix, cache_folder=None, log_file=None):
@@ -61,13 +82,8 @@ def setup_environment(output_file_prefix, cache_folder=None, log_file=None):
     """
 
     ## TODO: handle case where output already exists. Overwrite? Create new folder?
-    output_folder = os.path.dirname(output_file_prefix)
-    if not os.path.isdir(output_folder):
-        os.mkdir(output_folder)
-    output_file_prefix = os.path.join(output_folder, os.path.basename(output_file_prefix))
-
-    if cache_folder and not os.path.isdir(cache_folder):
-        os.mkdir(cache_folder)
+    output_file_prefix = create_folder(output_file_prefix)
+    cache_folder = create_folder(cache_folder)
 
     ## TODO: impelement logging; make sure logger doesn't do this automatically
     # if log_file and not os.path.isdir(log_file):
@@ -205,15 +221,15 @@ def read_mutation_rates(mutation_rates):
             mutation_rates = pd.read_excel(mutation_rates).values
         else:
             raise NotImplementedError
-    else:
-        # Attempt to convert input into 4x4 array of floats.
-        try:
-            mutation_rates = np.asarray(mutation_rates, dtype=np.float64)
-            assert mutation_rates.shape == (4, 4)
-        except (TypeError, AssertionError) as error:
-            print ('Mutation rate table must be a 4x4 table of numerical' +
-                   'mutation rates from ACGT(rows) to ACGT(columns).')
-            raise error
+
+    # Attempt to convert input into 4x4 array of floats.
+    try:
+        mutation_rates = np.asarray(mutation_rates, dtype=np.float64)
+        assert mutation_rates.shape == (4, 4)
+    except (TypeError, AssertionError) as error:
+        print ('Mutation rate table must be a 4x4 table of numerical \
+                mutation rates from ACGT(rows) to ACGT(columns).')
+        raise error
     return mutation_rates
 
 
