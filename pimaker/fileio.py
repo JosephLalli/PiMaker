@@ -282,8 +282,8 @@ def vcf_to_numpy_array_read_cts(vcf_file, contig_coords, region=None, maf=0):
             reference sequence.
     """
     better_names_for_vcf_fields = {'calldata/AD': 'AD', 'calldata/DP': 'DP', 'calldata/RD': 'RD',
-                                   'variants/ALT': 'alt', 'variants/CHROM': 'contig',
-                                   'variants/POS': 'pos', 'variants/REF': 'ref'}
+                                    'variants/ALT': 'alt', 'variants/CHROM': 'contig',
+                                    'variants/POS': 'pos', 'variants/REF': 'ref'}
     fields_to_extract = list(better_names_for_vcf_fields.keys()) + ['samples']
     vcf = allel.read_vcf(vcf_file, fields=fields_to_extract, rename_fields=better_names_for_vcf_fields, region=region)
     vcf['pos'] -= 1  # pos is 1-indexed in allel
@@ -357,6 +357,7 @@ def merge_split_multiallelics(values, index, action):
     elif action == 'reshape nucs':
         values_df = values_df.apply(lambda x: pd.Series([tuple(x[0].values) + ('',) * (3 - len(x))][0]))
         return values_df.values
+
 
 def save_tmp_chunk_results(contig, chunk_id, chunk_sample_pi, chunk_gene_pi, chunk_site_pi, var_site_positions, cache_folder):
     """

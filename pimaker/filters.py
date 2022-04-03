@@ -23,7 +23,7 @@ import utils
 nucs = 'ACGTN'
 nuc_dict = {'A': 0, 'C': 1, 'G': 2, 'T': 3, 'N': 4}
 nuc_array = np.concatenate((np.eye(4, dtype=np.int16),
-                            np.zeros((1,4), dtype=np.int16)))
+                            np.zeros((1, 4), dtype=np.int16)))
 nuc_tuple = tuple(map(tuple, nuc_array))
 all_codons = list(product(nuc_tuple, repeat=3))
 
@@ -75,7 +75,7 @@ def tuple_to_codon(t):
 
 # A one-hot tuple representation of the translate dictionary.
 # Used throughout this module.
-one_hot_translate = {codon_to_tuple(codon):AA for codon, AA in translate.items()}
+one_hot_translate = {codon_to_tuple(codon): AA for codon, AA in translate.items()}
 
 
 def make_num_sites_dict(mutation_rates=None, include_stop_codons=False):
@@ -106,18 +106,18 @@ def make_num_sites_dict(mutation_rates=None, include_stop_codons=False):
     these biases, likely using methods similar to `Yang and Nielson (2001)`_.
 
     Args:
-        mutation_rates: 
+        mutation_rates:
             If specified, will incorporate the likelihood of
             mutation when calculating the number of synon/nonsynon sites
             per codon, a la `Ina 1995`_. Optional, default None.
-        include_stop_codons: 
+        include_stop_codons:
             If True, will count mutations to or from stop
             codons as nonsynonymous. Most methods of calculating synon/nonsynon
             sites assume nonsense mutations are always evolutionary dead ends,
             and thus should be ignored. In some situations, that may not be the
             case. Optional, default False.
     Returns:
-        num_sites_per_codon: 
+        num_sites_per_codon:
             A dictionary of flattened one-hot tuple
             representations of codons to dictionaries of site indices (or
             'all') to dictionaries of the number of s or n sites in that codon
@@ -203,7 +203,7 @@ def make_synon_nonsynon_site_dict(num_sites_dict, include_stop_codons=False):
             [[AAT, CAT, GAT, TAT],
              [AAT, ACT, AGT, ATT],
              [AAA, AAC, AAG, AAT]]
-        This representation fo the number of sites in each codon allows us
+        This representation of the number of sites in each codon allows us
         to determine the number of synon/nonsynon sites at any given mixed site
         By simply multiplying the 3x4 array of nucleotide frequencies at that
         codon by this 3x4 array of the number of sites in that codon.
@@ -288,8 +288,10 @@ def generate_codon_synon_mutation_filters():
                     synon_pimath_filter[utils.flatten_codon(codon)][n, mutationID[refNuc + nuc]] = 1
     return synon_pimath_filter, nonsynon_pimath_filter
 
+
 # These filters are constant, so they can just be generated upon loading
 synon_pimath_filter, nonsynon_pimath_filter = generate_codon_synon_mutation_filters()
+
 
 def generate_coding_filters(sample_consensus_seqs, num_synon_sites, num_nonsynon_sites, idx_of_var_sites_in_gene=None, gene_name=None):
     """
@@ -377,6 +379,10 @@ def generate_coding_filters(sample_consensus_seqs, num_synon_sites, num_nonsynon
 
 
 def translate_codons(sample_consensus_seqs, codon, filters, num_synon_sites, num_nonsynon_sites):
+    """
+    Identifies the locations of a codon in all sequences, and updates provided
+    filters with the appropriate 
+    """
     '''time is 2.04ms for all, even w/ conversion (conversion adds 0.1ms)'''
     ixs = utils.get_idx(sample_consensus_seqs.reshape(-1, 12), codon)
     ixs = np.unravel_index(ixs, shape=sample_consensus_seqs.shape[:2])

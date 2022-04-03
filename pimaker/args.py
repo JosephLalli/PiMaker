@@ -34,6 +34,8 @@ def get_parser():
     parser.add_argument('-o', '--output', required=True, type=str, default='pimaker/result',
                         help='''Location of output files. Sample, Gene, and Site specific results will each have
                         this prefix + \'_gene.csv\', etc. attached. defaults to \'pimaker/result\'''')
+    parser.add_argument('--FST', type=bool, action='store_true',
+                        help='''Calculate pairwise FST, synonymous FST, and nonsynonymous FST for all sample pairs.''')
     parser.add_argument('--maf', type=float, default=0.0,
                         help='''Minimum intra-sample frequency of variants to be considered when calculating
                                 diversity''')

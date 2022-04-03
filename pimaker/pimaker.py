@@ -210,7 +210,7 @@ def make_pi(vcf_file, ref_fasta, gtf_file=None,
 
     # Stitch together chunks using groupby.
     # note that both per_site stats and per_gene stats are not going to be
-    # affected by chunking, since chunks are always divided in intergenic 
+    # affected by chunking, since chunks are always divided in intergenic
     # regions
     per_sample_and_stat = pi_per_sample_df.groupby(['sample_id', 'stat_name'])
     pi_per_sample_df = per_sample_and_stat.apply(lambda x: np.average(x.stat, weights=x.chunk_len))

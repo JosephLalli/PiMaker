@@ -171,3 +171,41 @@ def flatten_codon(codon):
     (1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1).
     """
     return tuple([*chain.from_iterable(x if isinstance(x, tuple) else [x] for x in codon)])
+
+
+def pair_and_sum_matrix(read_cts, axis=0, sample_names=None, pairing_idx=None):
+    '''
+    Given a matrix of (n by ...) dimensions and an array of labels,
+    returns a (n**2 by ...) matrix. Each entry along the specified dimension
+    in the output matrix is the sum of two entries in the input matrix. By
+    default, all possible pairwise sums are returned. Corresponding pairing
+    labels generated from the input samples names are also returned.
+
+    Args:
+        read_cts:
+            A (# of samples x # of variant sites x 4) array of A, C, G, and T
+            read counts of each sample at each variable site. Function can
+            be used with any (n x ...) matrix, though it is designed
+        axis:
+            Matrix axis along which to pair and sum.
+        sample_names:
+            Optional. Numpy array of names of each item along axis. If
+            provided, pair_and_sum_matrix will return the sample names
+            in a (n**2 x 2) matrix of paired samples.
+        pairing_idx:
+            Optional. (# of pairings x 2) matrix of indicies which should
+            be paired and summed. If not provided, all possible pairs will
+            be generated and returned.
+    Returns:
+        A (n**2 by ...) matrix of all pairwise comparisons (or a
+        (len(pairing_idx) by ...) matrix of paired entries, each value
+        being an element-wise sum of the paired entries.
+    '''
+
+    if pairing_idx is None:
+        possible_idx = np.arange(read_cts.shape[axis])
+        meshgrid = np.meshgrid(possible_idx, possible_idx)
+        pairing_idx = np.stack(meshgrid, -1).reshape(-1, 2)
+    pairing_names = sample_names[pairing_idx]
+    allvall_paired_readcts = read_cts[pairing_idx, ...].sum(axis+1)
+    return allvall_paired_readcts, pairing_names

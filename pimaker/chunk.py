@@ -137,7 +137,8 @@ def process_chunk(chunk_queue, result_queue, sample_list, id_to_symbol,
 
 
 def iterate_records(vcf_file, ref_array, contig_coords, transcript_coords, chunk_queue, tqdm_lock,
-                       num_var=None, num_processes=1, chunk_size=int(1e6), maf=0, cache_folder='chunk_cache'):
+                    num_var=None, num_processes=1, chunk_size=int(1e6), maf=0, 
+                    cache_folder='chunk_cache', FST=False):
     """
     A worker function that takes a concatenated one-hot reference sequence,
     input vcf file path, data from queue of chunks of
@@ -184,7 +185,7 @@ def iterate_records(vcf_file, ref_array, contig_coords, transcript_coords, chunk
     """
     tqdm.set_lock(tqdm_lock)
 
-    # Need to figure out how to iterate over sync files w/o loading everything into memory
+    ##TODO: Need to figure out how to iterate over sync files w/o loading everything into memory
     # mut_suffix = vcf_file.split('.')[-1:]
     # if 'sync' in mut_suffix:
     #     read_cts, var_pos, _ = pool_to_numpy(vcf_file)
