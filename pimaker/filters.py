@@ -208,9 +208,12 @@ def make_synon_nonsynon_site_dict(num_sites_dict, include_stop_codons=False):
         By simply multiplying the 3x4 array of nucleotide frequencies at that
         codon by this 3x4 array of the number of sites in that codon.
     """
-    num_synon_sites = {utils.flatten_codon(codon): np.zeros((3, 4), dtype=np.float64) for codon in all_codons}
-    num_nonsynon_sites = {utils.flatten_codon(codon): np.zeros((3, 4), dtype=np.float64) for codon in all_codons}
-
+    num_synon_sites = {
+        utils.flatten_codon(codon): np.zeros((3, 4), dtype=np.float64)
+        for codon in all_codons}
+    num_nonsynon_sites = {
+        utils.flatten_codon(codon): np.zeros((3, 4), dtype=np.float64)
+        for codon in all_codons}
     for codon in one_hot_translate.keys():
         if one_hot_translate[codon] == '*' and not include_stop_codons:
             continue
@@ -270,8 +273,10 @@ def generate_codon_synon_mutation_filters():
                   for key, code in mutationID.items()}
 
     # generate dictionary of codon to 3x7 nonsynon filter arrays:
-    synon_pimath_filter = {utils.flatten_codon(codon): np.zeros((3, 7), dtype=bool) for codon in all_codons}
-    nonsynon_pimath_filter = {utils.flatten_codon(codon): np.zeros((3, 7), dtype=bool) for codon in all_codons}
+    synon_pimath_filter = {utils.flatten_codon(codon): np.zeros((3, 7), dtype=bool)
+                           for codon in all_codons}
+    nonsynon_pimath_filter = {utils.flatten_codon(codon): np.zeros((3, 7), dtype=bool)
+                              for codon in all_codons}
     for codon in all_codons:
         if (0, 0, 0, 0) in codon:
             continue  # Ignore Ns - codons w/ N will not be factored into synon/nonsynon math
@@ -293,7 +298,9 @@ def generate_codon_synon_mutation_filters():
 synon_pimath_filter, nonsynon_pimath_filter = generate_codon_synon_mutation_filters()
 
 
-def generate_coding_filters(sample_consensus_seqs, num_synon_sites, num_nonsynon_sites, idx_of_var_sites_in_gene=None, gene_name=None):
+def generate_coding_filters(sample_consensus_seqs,
+                            num_synon_sites, num_nonsynon_sites,
+                            idx_of_var_sites_in_gene=None, gene_name=None):
     """
     Generates filters to calculate synonymous/nonsynoymous site counts and
     isolate synonymous/nonsynonymous pi math from one-hot representations of
