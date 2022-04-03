@@ -20,6 +20,7 @@ import fileio
 import filters
 import chunk
 from timeit import default_timer as timer
+import dask
 
 
 def make_pi(vcf_file, ref_fasta, gtf_file=None,
