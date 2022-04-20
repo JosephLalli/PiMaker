@@ -1,7 +1,7 @@
 # PiMaker
 Tool to calculate nucleotide diversity statistics in large pooled population datasets.
 
-##Installation instructions
+## Installation instructions
 
 To install, simply navigate to your project's folder and clone this repository using the following command:
 
