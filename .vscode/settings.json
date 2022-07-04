@@ -1,3 +1,17 @@
 {
-    "git.ignoreLimitWarning": true
+    "git.ignoreLimitWarning": true,
+    "python.linting.flake8Enabled": true,
+    "python.linting.enabled": true,
+    "python.languageServer": "Default",
+    "python.analysis.typeCheckingMode": "basic",
+    "python.analysis.extraPaths": ["/mnt/d/projects/pimaker"],
+    "python.analysis.diagnosticSeverityOverrides": { 
+        "reportUnboundVariable" : "information", 
+        "reportImplicitStringConcatenation" : "warning" 
+    },
+
+    "autoDocstring.guessTypes": true,
+    "autoDocstring.generateDocstringOnEnter": true,
+    "esbonio.sphinx.confDir": ""
+
 }

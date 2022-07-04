@@ -10,10 +10,14 @@ create chunks of data or to perform calculations on that chunk of data.
 import numpy as np
 from tqdm import tqdm
 import pickle
+import os, sys
+sys.path.append('/mnt/d/projects/PiMaker/pimaker')
 import fileio
 import calcpi
 import filters
 import utils
+import dask
+from dask import array as da
 
 
 def process_chunk(chunk_queue, result_queue, sample_list, id_to_symbol,
@@ -82,13 +86,14 @@ def process_chunk(chunk_queue, result_queue, sample_list, id_to_symbol,
             basic_data = (contig, chunk_id, chunk_len)
 
             # print ('Calculating Pi...')
-            piMath = calcpi.calculate_pi_math(read_cts)
+            # piMath = calcpi.calculate_pi_math(read_cts)
+            piMath = np.map_blocks(calculate_pi_math, read_cts, dtype=np.Array)
             with np.errstate(divide='ignore', invalid='ignore'):
                 freq_cts = np.where(read_cts.sum(axis=2, keepdims=True) == 0, ref_array_chunk[:, var_pos, :], read_cts)
                 freq_cts = freq_cts / freq_cts.sum(axis=2, keepdims=True)
 
-            chunk_per_site_pi = calcpi.per_site_pi(piMath)
-            chunk_per_sample_pi = calcpi.avg_pi_per_sample(chunk_per_site_pi, length=(bin_end - bin_start))
+            chunk_per_site_pi = np.map_blocks(calcpi.calc_per_site_pi, piMath, dtype=np.Array)
+            chunk_per_sample_pi = np.map_blocks(calcpi.avg_pi_per_sample, chunk_per_site_pi, dtype=np.Array, kwargs={'length': (bin_end - bin_start)})#(chunk_per_site_pi, length=(bin_end - bin_start))
 
             # before processing transcript results, record pi data
             chunk_sample_pi.extend([(sample_id,) + basic_data + ('pi',) + (pi,) for sample_id, pi in zip(sample_list, chunk_per_sample_pi)])
@@ -123,21 +128,21 @@ def process_chunk(chunk_queue, result_queue, sample_list, id_to_symbol,
                 pbar.update(1)
             pbar.refresh()
             result_queue.put((contig, chunk_id, chunk_sample_pi, chunk_transcript_pi, chunk_site_pi, var_pos))
-            # to_save = (read_cts, var_pos, transcript_coords, ref_array_chunk, bin_start, bin_end, contig,
-            #            chunk_id, piMath, freq_cts, chunk_per_site_pi, chunk_per_sample_pi, chunk_sample_pi,
-            #            chunk_site_pi, read_cts[:, transcript_var_slice, :],
-            #            sample_consensus_seqs[:, transcript_slice, :], muts_in_transcript, synon_cts,
-            #            freq_cts[:, transcript_var_slice, :], piMath[:, transcript_var_slice, :], sample_list,
-            #            oof_overlaps_idx, transcript, transcript_slice, basic_gene_data, transcript_var_slice)
-            # if 'NP' in contig:
-            #     with open('NP.pkl', 'wb') as f:
-            #         pickle.dump(to_save, f)
+            to_save = (read_cts, var_pos, transcript_coords, ref_array_chunk, bin_start, bin_end, contig,
+                       chunk_id, piMath, freq_cts, chunk_per_site_pi, chunk_per_sample_pi, chunk_sample_pi,
+                       chunk_site_pi, read_cts[:, transcript_var_slice, :],
+                       sample_consensus_seqs[:, transcript_slice, :], muts_in_transcript, synon_cts,
+                       freq_cts[:, transcript_var_slice, :], piMath[:, transcript_var_slice, :], sample_list,
+                       oof_overlaps_idx, transcript, transcript_slice, basic_gene_data, transcript_var_slice)
+            if 'NP' in contig:
+                with open('NP.pkl', 'wb') as f:
+                    pickle.dump(to_save, f)
         pbar.clear()
     return None
 
 
 def iterate_records(vcf_file, ref_array, contig_coords, transcript_coords, chunk_queue, tqdm_lock,
-                    num_var=None, num_processes=1, chunk_size=int(1e6), maf=0, 
+                    num_var=None, num_processes=1, chunk_size=int(1e6), maf=0,
                     cache_folder='chunk_cache', FST=False):
     """
     A worker function that takes a concatenated one-hot reference sequence,
@@ -225,11 +230,8 @@ def iterate_records(vcf_file, ref_array, contig_coords, transcript_coords, chunk
                 # allel is 1-indexed
                 region_string = f'{contig}:{bin_start - contig_coords[contig][0]+1}-{bin_end - contig_coords[contig][0]+1}'
                 read_cts, var_pos = fileio.vcf_to_numpy_array_read_cts(vcf_file, contig_coords[contig], region=region_string, maf=maf)
-                if read_cts is None: #if no mutations in region string
-                    chunk_id += 1
-                    pbar.update(1)
-                    continue
-                chunk_queue.put((read_cts, var_pos - bin_start, transcripts, ref_array[:, bin_start:bin_end+1, :], bin_start, bin_end, contig, chunk_id))
+
+                chunk_queue.put((read_cts, var_pos - bin_start, transcripts, ref_array[:, bin_start:bin_end, :], bin_start, bin_end, contig, chunk_id))
                 chunk_id += 1
                 pbar.update(1)
             pbar.refresh()
@@ -244,6 +246,7 @@ def iterate_records(vcf_file, ref_array, contig_coords, transcript_coords, chunk
     return None
 
 
+@dask.delayed
 def process_transcript(sample_consensus_seqs, muts_in_transcript, synon_cts,
                        SNP_freqs, transcript_pi_math, sample_list,
                        oof_overlaps_idx, transcript, transcript_slice,
@@ -302,10 +305,7 @@ def process_transcript(sample_consensus_seqs, muts_in_transcript, synon_cts,
     chunk_transcript_pi_vals[:] = np.nan
     if not pi_only:
         try:
-            synon_filters = filters.generate_coding_filters(sample_consensus_seqs,
-                                                            *synon_cts,
-                                                            idx_of_var_sites_in_transcript=muts_in_transcript,
-                                                            transcript_name=transcript)
+            synon_filters = filters.generate_coding_filters(sample_consensus_seqs, *synon_cts, idx_of_var_sites_in_transcript=muts_in_transcript, transcript_name=transcript)
         except ValueError:
             with open('log.txt', 'a') as log:
                 log.write(f'Chrom {basic_gene_data[0]}, chunk id {basic_gene_data[1]}, transcript {basic_gene_data[2]}, gene {basic_gene_data[4]} errored out. Transcript length was {basic_gene_data[6]}, which is {basic_gene_data[6]%3} off. First few nucs were {tuple(sample_consensus_seqs[0, :6, :].flatten())}\n')
@@ -318,12 +318,12 @@ def process_transcript(sample_consensus_seqs, muts_in_transcript, synon_cts,
 
     # The number of columns to keep track of here is large,
     # so I will fill in a numpy array to keep everything straight.
-    transcript_per_site_pi = calcpi.per_site_pi(transcript_pi_math)
+    transcript_per_site_pi = calcpi.calc_per_site_pi(transcript_pi_math)
     chunk_transcript_pi_vals[0] = calcpi.avg_pi_per_sample(transcript_per_site_pi, length=len(transcript_slice))
 
     if not pi_only:
-        nonSynonPerSitePi = calcpi.per_site_pi(transcript_pi_math * nonsynon_filter)
-        synonPerSitePi = calcpi.per_site_pi(transcript_pi_math * synon_filter)
+        nonSynonPerSitePi = calcpi.calc_per_site_pi(transcript_pi_math * nonsynon_filter)
+        synonPerSitePi = calcpi.calc_per_site_pi(transcript_pi_math * synon_filter)
         chunk_transcript_pi_vals[1] = calcpi.avg_pi_per_sample(nonSynonPerSitePi, length=nonsynon_sites.sum(axis=1) + num_const_nonsynon_sites)
         chunk_transcript_pi_vals[2] = calcpi.avg_pi_per_sample(synonPerSitePi, length=synon_sites.sum(axis=1) + num_const_synon_sites)
         chunk_transcript_pi_vals[3] = nonsynon_sites.sum(axis=1) + num_const_nonsynon_sites
@@ -344,8 +344,8 @@ def process_transcript(sample_consensus_seqs, muts_in_transcript, synon_cts,
 
             sample_transcript_N_sites_no_overlap = chunk_transcript_pi_vals[3] - nonsynon_sites[:, overlap_sites].sum(axis=1)
             sample_transcript_S_sites_no_overlap = chunk_transcript_pi_vals[4] - synon_sites[:, overlap_sites].sum(axis=1)
-            nonSynonPerSitePi_no_overlap = calcpi.per_site_pi(transcript_pi_math[:, remove_overlap_sites, :] * nonsynon_filter_no_overlap)
-            synonPerSitePi_no_overlap = calcpi.per_site_pi(transcript_pi_math[:, remove_overlap_sites, :] * synon_filter_no_overlap)
+            nonSynonPerSitePi_no_overlap = calcpi.calc_per_site_pi(transcript_pi_math[:, remove_overlap_sites, :] * nonsynon_filter_no_overlap)
+            synonPerSitePi_no_overlap = calcpi.calc_per_site_pi(transcript_pi_math[:, remove_overlap_sites, :] * synon_filter_no_overlap)
 
             chunk_transcript_pi_vals[6] = calcpi.avg_pi_per_sample(nonSynonPerSitePi_no_overlap, length=sample_transcript_N_sites_no_overlap)
             chunk_transcript_pi_vals[7] = calcpi.avg_pi_per_sample(synonPerSitePi_no_overlap, length=sample_transcript_S_sites_no_overlap)
@@ -357,3 +357,4 @@ def process_transcript(sample_consensus_seqs, muts_in_transcript, synon_cts,
         chunk_transcript_pi_vals[5:10] = chunk_transcript_pi_vals[0:5]
         basic_gene_data += (basic_gene_data[-1],)
     return [(sample_id,) + basic_gene_data + tuple(data) for sample_id, data, in zip(sample_list, chunk_transcript_pi_vals.T)]
+

@@ -7,7 +7,13 @@ using advanced indexing to create new subsets of sequences or read counts.
 """
 
 import numpy as np
+import dask
+import dask.array as da
 from itertools import chain
+
+
+def _vec_translate(a, my_dict):
+    return np.vectorize(my_dict.__getitem__)(a)
 
 
 def get_read_frame(ref_start, exon):
@@ -34,7 +40,7 @@ def get_read_frame(ref_start, exon):
         fwd_rev_adjust = 3
     return (exon_start - ref_start) % 3 + fwd_rev_adjust
 
-
+@dask.delayed
 def calc_overlaps(gene_slices, gene_coords, bin_start, bin_end):
     """
     Determines the nucleotides that are in overlapping coding regions of
@@ -56,13 +62,13 @@ def calc_overlaps(gene_slices, gene_coords, bin_start, bin_end):
         bin_end: Within-concatenated-reference end position of the chunk
             being processed.
     """
-    reading_frames = np.zeros(shape=(bin_end - bin_start, 6), dtype=bool)
+    reading_frames = da.zeros(shape=(bin_end - bin_start, 6), dtype=bool)
     for _, s in gene_coords.items():
         for exon in s:
             exon_read_frame = get_read_frame(bin_start, exon)
             reading_frames[min(exon):max(exon), exon_read_frame] = True
-    overlaps = np.where(reading_frames.sum(1) > 1)[0]
-    overlap_dict = {g: np.intersect1d(overlaps, v)[::np.sign(v[-1] - v[0])] for g, v in gene_slices.items()}
+    overlaps = da.where(reading_frames.sum(1) > 1)[0]
+    overlap_dict = {g: np.array(da.map_blocks(np.intersect1d, overlaps, v, dtype=np.int64))[::np.sign(v[-1] - v[0])] for g, v in gene_slices.items()}
     return {k: v for k, v in overlap_dict.items() if len(v) > 0}
 
 
@@ -91,6 +97,7 @@ def coordinates_to_slices(var_sites, genes):
     # takes no time
     overall_slices = {gene: np.r_[tuple(np.s_[start:stop:np.sign(stop - start)] for start, stop in coords)] for gene, coords in genes.items()}
     # takes 80% of time
+    var_sites = np.array(var_sites)
     variable_slices = {gene: np.where([p in s for p in var_sites])[0][::np.sign(s[-1] - s[0])] for gene, s in overall_slices.items()}
     # takes 20% of time
     idx_of_var_sites = {gene: np.where([p in var_sites for p in s])[0] for gene, s in overall_slices.items()}
@@ -100,7 +107,7 @@ def coordinates_to_slices(var_sites, genes):
 def calc_consensus_seqs(read_cts, ref_seq_array, var_index):
     """
     Determines the within-sample consensus sequence of each sample.
-
+    
     Args:
         read_cts:
             A (# of samples x # of variant sites x 4) array of A, C, G, and T
@@ -116,16 +123,68 @@ def calc_consensus_seqs(read_cts, ref_seq_array, var_index):
         sites are assumed to be the reference, while variable sites are
         assigned the major allele at each site in that sample.
     """
-    all_ref_seqs = np.tile(ref_seq_array, (read_cts.shape[0], 1, 1)).astype(bool).copy()
+    all_ref_seqs = da.tile(ref_seq_array, (read_cts.shape[0], 1, 1)).astype(bool).copy()
     # Fill reference
-    read_cts = np.where(np.all(read_cts == 0, axis=2, keepdims=True), all_ref_seqs[:, var_index], read_cts)
+    read_cts = da.where(da.all(read_cts == 0, axis=2, keepdims=True), all_ref_seqs[:, var_index], read_cts)
     # using argmax to ensure only one nucleotide is True
-    var_ref_seqs = np.zeros(read_cts.shape, dtype=bool)
-    np.put_along_axis(var_ref_seqs, np.argmax(read_cts, axis=2)[:, :, np.newaxis], True, axis=2)
+    var_ref_seqs = da.zeros(read_cts.shape, dtype=bool)
+    dask.delayed(np.put_along_axis)(var_ref_seqs, da.argmax(read_cts, axis=2), True, axis=2)
     all_ref_seqs[:, var_index, :] = var_ref_seqs
-
+    
     return all_ref_seqs
 
+
+import pickle as pkl
+class memoize(object):
+    def __init__(self, func):
+        self.func = func
+        self.memo = {}
+
+    def load_memo(self, filename):
+        try:
+            with open(filename, 'rb') as f:
+                self.memo.update(pkl.load(f))
+        except FileNotFoundError:
+            pass
+
+    def save_memo(self, filename):
+        # in case running in parallel, will update whats on disk and merge
+        self.load_memo(filename)
+        with open(filename, 'wb') as f:
+            pkl.dump(self.memo, f)
+
+    def __call__(self, *args, **kwargs):
+        key = str(args) + str(kwargs)
+        if not key in self.memo:
+            self.memo[key] = self.func(*args, **kwargs)
+        return self.memo[key]
+
+
+def put_along_axis_dask(arr, indices, values, axis):
+    arr_shape = arr.shape
+
+def _make_along_axis_idx(arr_shape, indices, axis):
+    # compute dimensions to iterate over
+    if not _nx.issubdtype(indices.dtype, _nx.integer):
+        raise IndexError('`indices` must be an integer array')
+    if len(arr_shape) != indices.ndim:
+        raise ValueError(
+            "`indices` and `arr` must have the same number of dimensions")
+    shape_ones = (1,) * indices.ndim
+    dest_dims = list(range(axis)) + [None] + list(range(axis+1, indices.ndim))
+
+    # build a fancy index, consisting of orthogonal aranges, with the
+    # requested index inserted at the right location
+    fancy_index = []
+    for dim, n in zip(dest_dims, arr_shape):
+        if dim is None:
+            fancy_index.append(indices)
+        else:
+            ind_shape = shape_ones[:dim] + (-1,) + shape_ones[dim+1:]
+            fancy_index.append(_nx.arange(n).reshape(ind_shape))
+
+    return tuple(fancy_index)
+import numpy.core.numeric as _nx
 
 def one_hot_encode(ACGT_array):
     """
@@ -158,9 +217,9 @@ def get_idx(sample_consensus_seqs, codon):
     """
     # required optimization. Longest step in piN/piS processing.
     # Current best time is 1.85ms for ixs in 10,000,000 chunk of nucs.
-    return np.where(np.all(sample_consensus_seqs == codon, axis=1))[0]
+    return da.where(da.all(sample_consensus_seqs == codon, axis=1))[0]
 
-
+@memoize
 def flatten_codon(codon):
     """
     Given a one hot tuple representation of a codon of the form
@@ -206,9 +265,6 @@ def pair_and_sum_matrix(read_cts, axis=0, sample_names=None, pairing_idx=None):
         possible_idx = np.arange(read_cts.shape[axis])
         meshgrid = np.meshgrid(possible_idx, possible_idx)
         pairing_idx = np.stack(meshgrid, -1).reshape(-1, 2)
-    if sample_names is not None:
-        pairing_names = sample_names[pairing_idx]
-    else:
-        pairing_names = None
+    pairing_names = sample_names[pairing_idx]
     allvall_paired_readcts = read_cts[pairing_idx, ...].sum(axis+1)
     return allvall_paired_readcts, pairing_names

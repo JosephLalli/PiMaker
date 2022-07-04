@@ -15,7 +15,11 @@ removed from all downstream calculations. They are assigned 0 N and S sites.
 
 
 import numpy as np
+import dask
+from dask import array as da
 from itertools import product
+import sys
+sys.path.append('/mnt/d/projects/PiMaker/pimaker')
 import utils
 
 # Including N to ensures reference sequences with missing nucleotides
@@ -130,11 +134,11 @@ def make_num_sites_dict(mutation_rates=None, include_stop_codons=False):
     # flattened tuple representations of
     # codons: mutation position in codon: 's' and 'n' sites
     num_sites_per_codon = {utils.flatten_codon(codon):
-                           {0: {'s':0,'n':0},
-                            1: {'s':0,'n':0},
-                            2: {'s':0,'n':0},
-                            'all': {'s':0,'n':0}}
-                            for codon in all_codons}
+                          {0: {'s': 0, 'n': 0},
+                           1: {'s': 0, 'n': 0},
+                           2: {'s': 0, 'n': 0},
+                           'all': {'s': 0, 'n': 0}}
+                           for codon in all_codons}
 
     for codon, AA in one_hot_translate.items():
         flat_codon = utils.flatten_codon(codon)
@@ -143,7 +147,7 @@ def make_num_sites_dict(mutation_rates=None, include_stop_codons=False):
         else:
             for i in range(3):
                 for nuc in nuc_tuple:
-                    edited_codon = codon[:i] + (nuc,) + codon[i+1:]
+                    edited_codon = codon[:i] + (nuc,) + codon[i + 1:]
                     if codon[i] == nuc:
                         # no need to spend time calculating the same codon
                         continue
@@ -208,11 +212,12 @@ def make_synon_nonsynon_site_dict(num_sites_dict, include_stop_codons=False):
         By simply multiplying the 3x4 array of nucleotide frequencies at that
         codon by this 3x4 array of the number of sites in that codon.
     """
-    num_synon_sites = {utils.flatten_codon(codon): np.zeros((3, 4), dtype=np.float64)
-                       for codon in all_codons}
-    num_nonsynon_sites = {utils.flatten_codon(codon): np.zeros((3, 4), dtype=np.float64)
-                          for codon in all_codons}
-
+    num_synon_sites = {
+        utils.flatten_codon(codon): np.zeros((3, 4), dtype=np.float64)
+        for codon in all_codons}
+    num_nonsynon_sites = {
+        utils.flatten_codon(codon): np.zeros((3, 4), dtype=np.float64)
+        for codon in all_codons}
     for codon in one_hot_translate.keys():
         if one_hot_translate[codon] == '*' and not include_stop_codons:
             continue
@@ -272,8 +277,10 @@ def generate_codon_synon_mutation_filters():
                   for key, code in mutationID.items()}
 
     # generate dictionary of codon to 3x7 nonsynon filter arrays:
-    synon_pimath_filter = {utils.flatten_codon(codon): np.zeros((3, 7), dtype=bool) for codon in all_codons}
-    nonsynon_pimath_filter = {utils.flatten_codon(codon): np.zeros((3, 7), dtype=bool) for codon in all_codons}
+    synon_pimath_filter = {utils.flatten_codon(codon): np.zeros((3, 7), dtype=bool)
+                           for codon in all_codons}
+    nonsynon_pimath_filter = {utils.flatten_codon(codon): np.zeros((3, 7), dtype=bool)
+                              for codon in all_codons}
     for codon in all_codons:
         if (0, 0, 0, 0) in codon:
             continue  # Ignore Ns - codons w/ N will not be factored into synon/nonsynon math
@@ -295,6 +302,7 @@ def generate_codon_synon_mutation_filters():
 synon_pimath_filter, nonsynon_pimath_filter = generate_codon_synon_mutation_filters()
 
 
+# @dask.delayed
 def generate_coding_filters(sample_consensus_seqs,
                             num_synon_sites, num_nonsynon_sites,
                             idx_of_var_sites_in_transcript=None, transcript_name=None):
@@ -339,7 +347,9 @@ def generate_coding_filters(sample_consensus_seqs,
     diff_from_three = sample_consensus_seqs.shape[1] % 3
     if diff_from_three != 0:
         with open('log.txt', 'a') as log:
-            log.write(f'{transcript_name} had a length of {sample_consensus_seqs.shape[1]} nt; off by {diff_from_three}. First codon was {tuple(sample_consensus_seqs[0, :3, :].flatten())}\n')
+            log.write(f'{transcript_name} had a length of {sample_consensus_seqs.shape[1]} nt; \
+                        off by {diff_from_three}. First codon was \
+                        {tuple(sample_consensus_seqs[0, :3, :].flatten())}\n')
         sample_consensus_seqs = sample_consensus_seqs[:, sample_consensus_seqs.shape[1] % 3, ...]
     sample_consensus_seqs = sample_consensus_seqs.reshape(num_samples, -1, 12).astype(np.uint8)
     num_codons = sample_consensus_seqs.shape[1]
@@ -354,10 +364,10 @@ def generate_coding_filters(sample_consensus_seqs,
 
     for codon in one_hot_translate.keys():
         filters = translate_codons(sample_consensus_seqs,
-                                   utils.flatten_codon(codon),
-                                   filters,
-                                   num_synon_sites,
-                                   num_nonsynon_sites)
+                                    utils.flatten_codon(codon),
+                                    filters,
+                                    num_synon_sites,
+                                    num_nonsynon_sites)
 
     nonSynonFilter, synonFilter, nonSynonSites, synonSites = filters
     nonSynonFilter = nonSynonFilter.reshape(num_samples, -1, 7)
@@ -381,11 +391,11 @@ def generate_coding_filters(sample_consensus_seqs,
 
     return synonFilter, nonSynonFilter, synonSites, nonSynonSites, num_const_synon_sites, num_const_nonsynon_sites
 
-
+# @dask.delayed
 def translate_codons(sample_consensus_seqs, codon, filters, num_synon_sites, num_nonsynon_sites):
     """
     Identifies the locations of a codon in all sequences, and updates provided
-    filters with the appropriate 
+    filters with the appropriate
     """
     '''time is 2.04ms for all, even w/ conversion (conversion adds 0.1ms)'''
     ixs = utils.get_idx(sample_consensus_seqs.reshape(-1, 12), codon)

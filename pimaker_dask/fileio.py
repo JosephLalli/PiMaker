@@ -15,6 +15,10 @@ import contextlib
 from collections import OrderedDict
 from tqdm import tqdm
 import os
+from pathlib import Path
+import dask.array as da
+
+import utils
 
 nucs = 'ACGTN'
 nuc_dict = {'A': 0, 'C': 1, 'G': 2, 'T': 3, 'N': 4}
@@ -36,6 +40,25 @@ def safe_open(filepath, rw):
         yield file
     finally:
         file.close()
+
+
+def add_number(folder_path):
+    try:
+        number_suffix = int(folder_path.stem.split('_')[-1])
+        base = ''.join(folder_path.stem.split('_')[:-1])
+        return folder_path.with_name(base + f'_{number_suffix + 1}' + folder_path.suffix)
+
+    except (IndexError, ValueError):
+        return folder_path.with_name(folder_path.stem + '_1' + folder_path.suffix)
+
+
+def create_folder(folder_path):
+    folder_path = Path(folder_path)
+    if folder_path.exists():
+        while folder_path.exists():
+            folder_path = add_number(folder_path)
+    folder_path.mkdir(parents=True)
+    return folder_path
 
 
 def setup_environment(output_file_prefix, cache_folder=None, log_file=None):
@@ -61,18 +84,11 @@ def setup_environment(output_file_prefix, cache_folder=None, log_file=None):
     """
 
     ## TODO: handle case where output already exists. Overwrite? Create new folder?
-    output_folder = os.path.dirname(output_file_prefix)
-    if not os.path.isdir(output_folder):
-        os.makedirs(output_folder)
-    output_file_prefix = os.path.join(output_folder, os.path.basename(output_file_prefix))
+    output_file_prefix = create_folder(output_file_prefix)
+    if cache_folder is not None:
+        cache_folder = create_folder(cache_folder)
 
-    if cache_folder is None:
-        cache_folder = os.path.join(output_file_prefix, 'tmp')
-
-    if not os.path.isdir(cache_folder):
-        os.makedirs(cache_folder)
-
-    ## TODO: implement logging; make sure logger doesn't do this automatically
+    ## TODO: impelement logging; make sure logger doesn't do this automatically
     # if log_file and not os.path.isdir(log_file):
     #     os.mkdir(log_file_dir)
 
@@ -208,15 +224,15 @@ def read_mutation_rates(mutation_rates):
             mutation_rates = pd.read_excel(mutation_rates).values
         else:
             raise NotImplementedError
-    else:
-        # Attempt to convert input into 4x4 array of floats.
-        try:
-            mutation_rates = np.asarray(mutation_rates, dtype=np.float64)
-            assert mutation_rates.shape == (4, 4)
-        except (TypeError, AssertionError) as error:
-            print ('Mutation rate table must be a 4x4 table of numerical' +
-                   'mutation rates from ACGT(rows) to ACGT(columns).')
-            raise error
+
+    # Attempt to convert input into 4x4 array of floats.
+    try:
+        mutation_rates = np.asarray(mutation_rates, dtype=np.float64)
+        assert mutation_rates.shape == (4, 4)
+    except (TypeError, AssertionError) as error:
+        print ('Mutation rate table must be a 4x4 table of numerical \
+                mutation rates from ACGT(rows) to ACGT(columns).')
+        raise error
     return mutation_rates
 
 
@@ -225,8 +241,9 @@ def convert_to_onehot(seq, default_idx=(0, 0, 0, 0)):
     Converts an ACTGN genetic sequence to a one-hot np.int16 representation
     of the sequence of size 4 x sequence length.
     """
-    u, inv = np.unique(seq, return_inverse=True)
-    return np.array([tuple_dict.get(x, default_idx) for x in u], dtype=np.int16)[inv]
+    u, inv = da.unique(seq, return_inverse=True)
+    onehot_u = da.array([tuple_dict.get(x, default_idx) for x in np.array(u)])
+    return onehot_u[inv]
 
 
 def load_references(ref_fasta):
@@ -245,10 +262,17 @@ def load_references(ref_fasta):
         refseq = [(id.split(' ')[0], seq.upper()) for id, seq in SimpleFastaParser(fasta)]
     ref_seq_array, contig_starts, contig_coords = combine_contigs(refseq)
     ref_seq_array = convert_to_onehot(ref_seq_array)[np.newaxis, :, :]
+    # ref_seq_array = da.from_array(ref_seq_array)
     return ref_seq_array, contig_starts, contig_coords
 
 
-def vcf_to_numpy_array_read_cts(vcf_file, contig_coords, region=None, maf=0):
+# def load_reference_as_onehot(ref_fasta):
+#     with safe_open(ref_fasta, 'r') as fasta:
+#         for id, seq in SimpleFastaParser:
+
+
+
+def vcf_to_numpy_array_read_cts(vcf_file, contig_starts, region=None, maf=0):
     """
     Utilizing scikit-allel, reads a vcf file and generates a numpy array of
     read counts, optionally applying a region and minor frequency filter.
@@ -263,9 +287,9 @@ def vcf_to_numpy_array_read_cts(vcf_file, contig_coords, region=None, maf=0):
         vcf_file:
             Path to the vcf formatted file of variant calls. Should
             contain all samples/pools being measured.
-        contig_coords:
+        contig_starts:
             A dictionary of contig_ids (as named in the vcf_file) to
-            (start, stop) indices of that contig in the concatenated reference
+            start indices of that contig in the concatenated reference
             sequence.
         region:
             Optional, default None. A tabix-style string of the form
@@ -285,22 +309,25 @@ def vcf_to_numpy_array_read_cts(vcf_file, contig_coords, region=None, maf=0):
             reference sequence.
     """
     better_names_for_vcf_fields = {'calldata/AD': 'AD', 'calldata/DP': 'DP', 'calldata/RD': 'RD',
-                                    'variants/ALT': 'alt', 'variants/CHROM': 'contig',
-                                    'variants/POS': 'pos', 'variants/REF': 'ref'}
+                                   'variants/ALT': 'alt', 'variants/CHROM': 'contig',
+                                   'variants/POS': 'pos', 'variants/REF': 'ref'}
     fields_to_extract = list(better_names_for_vcf_fields.keys()) + ['samples']
     vcf = allel.read_vcf(vcf_file, fields=fields_to_extract, rename_fields=better_names_for_vcf_fields, region=region)
-    if vcf is None:
-        return None, None
     vcf['pos'] -= 1  # pos is 1-indexed in allel
+
     if region is None:
-        vcf['pos'] = np.array([pos + contig_coords[contig][0] for contig, pos in zip(vcf['contig'], vcf['pos'])])
+        # convert pos values from within-contig position to within-concatenated-genome position
+        vcf['pos'] = vcf['pos'] + utils._vec_translate(vcf['contig'], contig_starts)
         og_var_pos = vcf['pos']
     else:
-        og_var_pos = vcf['pos'] + contig_coords[0]
+        og_var_pos = vcf['pos'] + list(contig_starts.values())[0]
 
     var_pos, var_pos_ind = np.unique(og_var_pos, return_index=True)
 
-    if len(var_pos) < len(og_var_pos):  # if multiallelic sites are already split up, I need to concat them back together
+    # if there are duplicate values og_var_pos, that means some listed
+    # mutations occupy the same site. That means there are multiallelic sites
+    # that are not combined. I need to concat them back together
+    if len(var_pos) < len(og_var_pos):
         vcf['ref'] = vcf['ref'][var_pos_ind]
         vcf['RD'] = merge_split_multiallelics(vcf['RD'], og_var_pos, action='sum')
         vcf['AD'] = merge_split_multiallelics(vcf['AD'][:, :, 0], og_var_pos, action='reshape counts')
@@ -314,7 +341,7 @@ def vcf_to_numpy_array_read_cts(vcf_file, contig_coords, region=None, maf=0):
     read_cts = read_cts * vcf['RD']
     for i, alts in enumerate(vcf['alt'].T):
         read_cts += convert_to_onehot(alts, default_idx=tuple_dict['N'])[np.newaxis, :, :] * vcf['AD'][:, :, i:(i + 1)]
-    read_cts = np.where(read_cts < maf * read_cts.sum(2, keepdims=True), 0, read_cts)
+    read_cts = da.where(read_cts < maf * read_cts.sum(2, keepdims=True), 0, read_cts)
     read_cts = read_cts.astype(np.uint32)
     var_pos = var_pos.astype(np.uint64)
     return read_cts, var_pos
@@ -439,7 +466,7 @@ def combine_contigs(refseq):
         contigStarts[id] = runningtally
         contigCoords[id] = (runningtally, runningtally + len(seq))
         runningtally += len(seq)
-    ref_seq_array = np.array(list(concatrefseq))
+    ref_seq_array = da.array(list(concatrefseq))
     return ref_seq_array, contigStarts, contigCoords
 
 
@@ -474,10 +501,9 @@ def parse_gtf(gtffile, contig_coords=None):
     gene_coords = OrderedDict()
     id_to_symbol = dict()
     transcript_to_gene_id = dict()
-    
-    if contig_coords is not None:
-        for chrom in contig_coords.keys():
-            gene_coords[chrom] = OrderedDict()
+
+    for chrom in contig_coords.keys():
+        gene_coords[chrom] = OrderedDict()
 
     for line in gtf:
         line = line.replace("/", "_")
@@ -572,7 +598,6 @@ def vcf_to_sync(vcf_file, sync_file=None):
     Converts a vcf file to a Popoolation pool file.
     Currently in development and untested. Do not use.
     """
-    raise NotImplementedError
     import pysam
     if sync_file is None:
         sync_file = vcf_file.replace('.vcf', '.sync').replace('.bcf', '.sync').replace('.gz', '')

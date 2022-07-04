@@ -1,0 +1,7 @@
+
+# Links for documentation
+.. _Nelson and Hughes (2015): https://www.ncbi.nlm.nih.gov/pmc/articles/PMC307640/
+.. _Nei and Gojobori (1986): https://pubmed.ncbi.nlm.nih.gov/3444411/
+.. _Yang and Nielson (2001): https://academic.oup.com/mbe/article/17/1/32/975527
+.. _Ina (1995): https://pubmed.ncbi.nlm.nih.gov/7699723/
+.. _OLGenie algorithm: https://pubmed.ncbi.nlm.nih.gov/32243542/

@@ -12,21 +12,95 @@ compiling results into summary dataframes.
 
 import os
 import sys
-import shutil
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
 import multiprocessing as mp
+sys.path.insert(0, '/mnt/d/projects/pimaker/pimaker')
 import fileio
 import filters
-import chunk
-import args as args_module
+from PiMaker.pimaker import chunk
+import calcpi
+import utils
 from timeit import default_timer as timer
+import dask
+import dask.array as da
+from dask.distributed import Client
+
+
+# def make_pi_with_dask(vcf_file, ref_fasta, gtf_file=None,
+#             output_file_prefix='pimaker/results', maf=0.01,
+#             mutation_rates=None, include_stop_codons=False,
+#             rolling_window=None, pi_only=False, chunk_size=int(1e6),
+#             cache_folder=None, num_processes=1, return_results=False,
+#             return_csv=False):
+output_file_prefix, cache_folder = fileio.setup_environment(output_file_prefix,
+                                                        cache_folder=cache_folder)
+
+client = Client()
+
+print (f'Dask scheduler running at {client.dashboard_link}')
+
+if mutation_rates:
+    mutation_rates = fileio.read_mutation_rates(mutation_rates)
+
+num_sites_dict = filters.make_num_sites_dict(mutation_rates, include_stop_codons)
+synon_cts = filters.make_synon_nonsynon_site_dict(num_sites_dict, include_stop_codons)
+
+print (f'Loading reference sequence from {ref_fasta}...')
+ref_array, contig_starts, contig_coords = fileio.load_references(ref_fasta)
+
+sample_list = fileio.get_sample_list(vcf_file)
+num_var = fileio.get_num_var(vcf_file)
+
+print (f'Loading annotation information from {gtf_file}...')
+transcript_coords, transcript_to_gene_id, id_to_symbol = fileio.parse_gtf(gtf_file, contig_starts)
+
+# region_string = f'{contig}:{bin_start - contig_coords[contig][0]+1}-{bin_end - contig_coords[contig][0]+1}'
+read_cts, var_pos = fileio.vcf_to_numpy_array_read_cts(vcf_file, contig_starts, region=None, maf=maf)
+
+piMath = da.map_blocks(calcpi.calculate_pi_math, read_cts, dtype=da.Array)
+with np.errstate(divide='ignore', invalid='ignore'):
+    freq_cts = da.where(read_cts.sum(axis=2, keepdims=True) == 0, ref_array[:, var_pos, :], read_cts)
+    freq_cts = freq_cts / freq_cts.sum(axis=2, keepdims=True)
+
+chunk_per_site_pi = da.map_blocks(calcpi.calc_per_site_pi, piMath, dtype=da.Array)
+chunk_per_sample_pi = da.map_blocks(calcpi.avg_pi_per_sample, chunk_per_site_pi, dtype=da.Array, length=ref_array.shape[1])
+
+# transcript_slices, transcript_var_slices, idx_of_var_sites = utils.coordinates_to_slices(var_pos, transcript_coords)
+contig_to_slices = {contig: utils.coordinates_to_slices(var_pos, transcript_coords[contig]) for contig in transcript_coords.keys()}
+contig_to_oof_overlaps_idx = {contig: utils.calc_overlaps(transcript_slices, transcript_coords[contig], 0, ref_array.shape[1])
+                                for contig, (transcript_slices, _, _) in contig_to_slices.items()}
+
+sample_consensus_seqs = utils.calc_consensus_seqs(read_cts, ref_array, var_pos)
+
+
+chunk_transcript_pi_results=list()
+for contig, (transcript_slices, transcript_var_slices, idx_of_var_sites) in contig_to_slices.items():
+    oof_overlaps_idx = contig_to_oof_overlaps_idx[contig].compute()
+    for i, (transcript, transcript_slice) in enumerate(transcript_slices.items()):
+        basic_gene_data = (contig, transcript, id_to_symbol[transcript], transcript_to_gene_id[transcript],
+                        id_to_symbol[transcript_to_gene_id[transcript]], len(transcript_slice))
+        transcript_var_slice = transcript_var_slices[transcript]
+        muts_in_transcript = idx_of_var_sites[transcript]
+
+        transcript_oof_overlaps_idx = oof_overlaps_idx.get(transcript, None)
+        
+        transcript_args = (sample_consensus_seqs[:, transcript_slice, :], muts_in_transcript,
+                    synon_cts, freq_cts[:, transcript_var_slice, :], piMath[:, transcript_var_slice, :],
+                    sample_list, transcript_oof_overlaps_idx, transcript, transcript_slice, basic_gene_data,
+                    pi_only)
+        chunk_transcript_pi_results.append(chunk.process_transcript(*transcript_args))
+chunk_transcript_pi_results = dask.compute(*chunk_transcript_pi_results)
+
+# def process_contig(contig, oof_overlaps_idx, transcript_slices, transcript_var_slices, idx_of_var_sites):
+
+
 
 
 def make_pi(vcf_file, ref_fasta, gtf_file=None,
             output_file_prefix='pimaker/results', maf=0.01,
-            mutation_rates=None, include_stop_codons=False, FST=False,
+            mutation_rates=None, include_stop_codons=False,
             rolling_window=None, pi_only=False, chunk_size=int(1e6),
             cache_folder=None, num_processes=1, return_results=False,
             return_csv=False):
@@ -70,9 +144,6 @@ def make_pi(vcf_file, ref_fasta, gtf_file=None,
             sites assume nonsense mutations are always evolutionary dead ends,
             and thus should be ignored. In some situations, that may not be the
             case. Optional, default False.
-        FST:
-            If True, will calculate FST, FSTn, and FSTs for all possible sample
-            comparisons. Implemented, but still in development.
         rolling_window:
             Optional, default None. Currently unimplemented.
         pi_only:
@@ -81,7 +152,7 @@ def make_pi(vcf_file, ref_fasta, gtf_file=None,
             Optional, default 1e6. Number of nucleotides of each contig's
             reference sequence to be processed per chunk. If 0, each contig
             will be placed into the chunk queue as one chunk.
-        cache_folder: 
+        cache_folder:
             Optional, default None. Folder for PiMaker to save cached,
             processed variant data.
         num_processes:
@@ -171,11 +242,9 @@ def make_pi(vcf_file, ref_fasta, gtf_file=None,
 
     # Else, compile formatted, collated reports
     print ('Making gene reports...')
-    
-    pi_per_gene_df = list()
+    pi_per_gene_df = pd.DataFrame()
     for gene_filename in result_files_genes_pi:
-        pi_per_gene_df.append(pd.read_csv(gene_filename))
-    pi_per_gene_df = pd.concat(pi_per_gene_df)
+        pi_per_gene_df = pi_per_gene_df.append(pd.read_csv(gene_filename))
 
     def _weighted_avg_nonsynon(x):
         return np.average(x.piN_no_overlap, weights=x.N_sites_no_overlap)
@@ -235,7 +304,7 @@ def make_pi(vcf_file, ref_fasta, gtf_file=None,
 
     print ('Making contig report...')
     contig_dfs = pd.DataFrame()
-    contig_pis = {contig: (None, None) for contig in result_files_sites_pi.keys()}
+    contig_pis = {contig: None for contig in result_files_sites_pi.keys()}
     contig_lengths = {contig: (contig_coords[contig][1] - contig_coords[contig][0])
                       for contig in contig_coords.keys()}
 
@@ -269,9 +338,6 @@ def make_pi(vcf_file, ref_fasta, gtf_file=None,
         else:
             contig_dfs = contig_dfs.append(pi_per_contig_df)
 
-    # delete temp folder
-    shutil.rmtree(cache_folder)
-
     # Finally, return results or filenames of results
     if return_results:
         return pi_per_sample_df, contig_dfs, pi_per_gene_df
@@ -279,12 +345,13 @@ def make_pi(vcf_file, ref_fasta, gtf_file=None,
         return None
 
 
-def main():
+def main(args=None):
     """
     Main function called during command line use of PiMaker. Obtains command
     line arguments, and runs :func:makepi. 
     """
-    parser = args_module.get_parser()
+    print('Welcome to PiMaker!')
+    parser = args.get_parser()
     arg_name_dict = {'vcf': 'vcf_file', 'gtf': 'gtf_file', 'threads': 'num_processes', 'output': 'output_file_prefix'}
     if len(sys.argv[1:]) == 0:
         parser.print_help()
@@ -293,6 +360,8 @@ def main():
         args = parser.parse_args()
         args = vars(args)
         args = {arg_name_dict.get(k, k): v for k, v in args.items()}
+    print (args)
+    print ('\n')
     start = timer()
     with open('log.txt', 'a') as f:
         f.write(f'{start}\n')

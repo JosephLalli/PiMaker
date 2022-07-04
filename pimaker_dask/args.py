@@ -34,9 +34,9 @@ def get_parser():
     parser.add_argument('-o', '--output', required=True, type=str, default='pimaker/result',
                         help='''Location of output files. Sample, Gene, and Site specific results will each have
                         this prefix + \'_gene.csv\', etc. attached. defaults to \'pimaker/result\'''')
-    parser.add_argument('--FST', action='store_true',
+    parser.add_argument('--FST', type=bool, action='store_true',
                         help='''Calculate pairwise FST, synonymous FST, and nonsynonymous FST for all sample pairs.''')
-    parser.add_argument('--maf', type=float, default=0.01,
+    parser.add_argument('--maf', type=float, default=0.0,
                         help='''Minimum intra-sample frequency of variants to be considered when calculating
                                 diversity''')
     parser.add_argument('--mutation_rates', type=str, default=None,
@@ -58,7 +58,7 @@ def get_parser():
                                 faster performance with more memory usage. Lower chunk_size results in (slightly) slower
                                 performance with less memory usage. Default value is 1,000,000 nucleotides per analyzed
                                 chunk. Please adjust this first if you are encoutering errors due to high memory usage''', default=int(1e6))
-    parser.add_argument('-t', '--threads', type=int, default=max(1, len(os.sched_getaffinity(0)) - 1),
+    parser.add_argument('-t', '--threads', type=int, default=os.cpu_count() - 1,
                         help='''Number of processes to use while performing calculations''')
     return parser
 
@@ -77,9 +77,7 @@ class MyHelpFormatter(argparse.HelpFormatter):
 
     def _get_help_string(self, action):
         help_text = action.help
-        if (help_text is not None and 
-            action.default != argparse.SUPPRESS and 
-            'default' not in help_text.lower() and 
-            action.default is not None):
-                help_text += ' (default: ' + str(action.default) + ')'
+        if action.default != argparse.SUPPRESS and 'default' not in help_text.lower() and \
+                action.default is not None:
+            help_text += ' (default: ' + str(action.default) + ')'
         return help_text
