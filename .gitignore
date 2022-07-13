@@ -1,3 +1,5 @@
+.gitignore
+.vscode
 test_data
 __pycache__
 acgt_codec.py
