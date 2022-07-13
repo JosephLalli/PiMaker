@@ -8,6 +8,7 @@ using advanced indexing to create new subsets of sequences or read counts.
 
 import numpy as np
 from itertools import chain
+# from intervaltree import Interval, IntervalTree
 
 
 def get_read_frame(ref_start, exon):
@@ -91,10 +92,51 @@ def coordinates_to_slices(var_sites, genes):
     # takes no time
     overall_slices = {gene: np.r_[tuple(np.s_[start:stop:np.sign(stop - start)] for start, stop in coords)] for gene, coords in genes.items()}
     # takes 80% of time
-    variable_slices = {gene: np.where([p in s for p in var_sites])[0][::np.sign(s[-1] - s[0])] for gene, s in overall_slices.items()}
+    idxes = {gene: (np.intersect1d(var_sites, s, assume_unique=True, return_indices=True) + (np.sign(int(s[-1] - s[0])),)) for gene, s in overall_slices.items()}
+    variable_slices = {gene: var[::sign] for gene, (s, var, idx, sign) in idxes.items()}
     # takes 20% of time
-    idx_of_var_sites = {gene: np.where([p in var_sites for p in s])[0] for gene, s in overall_slices.items()}
+    idx_of_var_sites = {gene: idx for gene, (s, var, idx, sign) in idxes.items()}
     return overall_slices, variable_slices, idx_of_var_sites
+
+#profiling notes:
+# var_sites = var_pos[:10000] (#529942)
+# only doing first 50 genes
+# og method: 2.26ms, 2.51s and 1.08s
+# alt: 2.26ms, 12.4ms, 
+# def intervals_to_slices(var_sites, genes):
+#     """
+#     Returns different methods of indexing the variant sites in a gene.
+
+#     Args:
+#         var_sites:
+#             List of the reference sequence indices of variable sites.
+#         genes:
+#             Dictionary of transcript_ids to list of (start, end) tuples
+#             containing the coordinates of the exons in that transcript.
+#     Returns:
+#         A tuple containing:
+#             overall_slices: dictionary of transcript_ids to slices of the
+#                 concatenated ref that are in the coding regions of that
+#                 transcript.
+#             variable_slices: dictionary of transcript_ids to the indices of
+#                 the chunk variant site array that are present in that
+#                 transcript.
+#             idx_of_var_sites: dictionary of transcript_ids to the location of
+#                 variant sites in the reference sequence of that transcript.
+#     """
+#     ##TODO: This is oddly slow, and I'd like to figure out faster ways of doing this.
+#     # takes no time
+#     overall_slices = {gene: np.r_[tuple(np.s_[interval.begin:interval.end:np.sign(interval.end - interval.begin)] for interval in coords)] for gene, coords in genes.items()}
+#     # takes 80% of time
+#     variable_slices = {gene: np.where([p in s for p in var_sites])[0][::np.sign(s[-1] - s[0])] for gene, s in overall_slices.items()}
+#     # takes 20% of time
+#     idx_of_var_sites = {gene: np.where([p in var_sites for p in s])[0] for gene, s in overall_slices.items()}
+#     return overall_slices, variable_slices, idx_of_var_sites
+
+
+# def interval_tree_to_numpy_slice(tree):
+    
+#     return np.r_[tuple(np.s_[interval.begin:interval.end] for interval in tree)]
 
 
 def calc_consensus_seqs(read_cts, ref_seq_array, var_index):

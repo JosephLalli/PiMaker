@@ -5,6 +5,7 @@ This module contains functions for obtaining data from reference fasta, gtf file
 
 """
 
+
 import numpy as np
 import pandas as pd
 import allel
@@ -14,6 +15,8 @@ import gzip
 import contextlib
 from collections import OrderedDict
 from tqdm import tqdm
+import glob
+# from intervaltree import Interval, IntervalTree
 import os
 
 nucs = 'ACGTN'
@@ -103,8 +106,8 @@ def get_num_var(vcf_file, contig=False):
     else:
         cmd = f'bcftools index --nrecords {vcf_file}'
         retval = os.popen(cmd).read()
-        num_muts = int(retval.strip())
-    return num_muts
+        retval = int(retval.strip())
+    return retval
 
 
 def get_sample_list(vcf_file):
@@ -243,9 +246,9 @@ def load_references(ref_fasta):
     """
     with safe_open(ref_fasta, 'r') as fasta:
         refseq = [(id.split(' ')[0], seq.upper()) for id, seq in SimpleFastaParser(fasta)]
-    ref_seq_array, contig_starts, contig_coords = combine_contigs(refseq)
+    ref_seq_array, contig_coords = combine_contigs(refseq)
     ref_seq_array = convert_to_onehot(ref_seq_array)[np.newaxis, :, :]
-    return ref_seq_array, contig_starts, contig_coords
+    return ref_seq_array, contig_coords#, contig_interval_tree
 
 
 def vcf_to_numpy_array_read_cts(vcf_file, contig_coords, region=None, maf=0):
@@ -288,7 +291,10 @@ def vcf_to_numpy_array_read_cts(vcf_file, contig_coords, region=None, maf=0):
                                     'variants/ALT': 'alt', 'variants/CHROM': 'contig',
                                     'variants/POS': 'pos', 'variants/REF': 'ref'}
     fields_to_extract = list(better_names_for_vcf_fields.keys()) + ['samples']
-    vcf = allel.read_vcf(vcf_file, fields=fields_to_extract, rename_fields=better_names_for_vcf_fields, region=region)
+    index = glob.glob(vcf_file + '.*')
+    if len(index) == 0:
+        raise AttributeError('VCF file must be indexed.')
+    vcf = allel.read_vcf(vcf_file, fields=fields_to_extract, rename_fields=better_names_for_vcf_fields, region=region, tabix='tabix')
     if vcf is None:
         return None, None
     vcf['pos'] -= 1  # pos is 1-indexed in allel
@@ -406,9 +412,9 @@ def save_tmp_chunk_results(contig, chunk_id, chunk_sample_pi, chunk_gene_pi, chu
     gene_filename = f'{cache_folder}/{contig}_{chunk_id}_gene.csv'
     site_filename = f'{cache_folder}/{contig}_{chunk_id}_site.csv'
 
-    chunk_sample_pi_df.to_csv(sample_filename)
-    chunk_gene_pi_df.to_csv(gene_filename)
-    chunk_site_pi_df.to_csv(site_filename)
+    chunk_sample_pi_df.to_csv(sample_filename, index=False)
+    chunk_gene_pi_df.to_csv(gene_filename, index=False)
+    chunk_site_pi_df.to_csv(site_filename, index=False)
 
     return sample_filename, gene_filename, site_filename
 
@@ -429,18 +435,20 @@ def combine_contigs(refseq):
               within the concatenated genome
             - A dictionary of contig names to (start, end) tuples containing
               the coordinates of the contig within the concatenated genome
+            - A intervaltree object containing the start-end coordinates of 
+              every contig
     """
     '''Combine contig sequences into one string, annotate contig locations within concatenated genome'''
     concatrefseq = "".join([seq[1] for seq in refseq])
-    contigStarts = dict()
     contigCoords = dict()
     runningtally = 0
+    # contig_interval_tree = IntervalTree()
     for id, seq in refseq:
-        contigStarts[id] = runningtally
         contigCoords[id] = (runningtally, runningtally + len(seq))
+        # contig_interval_tree[runningtally:runningtally+len(seq)] = id
         runningtally += len(seq)
     ref_seq_array = np.array(list(concatrefseq))
-    return ref_seq_array, contigStarts, contigCoords
+    return ref_seq_array, contigCoords#, None #contig_interval_tree
 
 
 def parse_gtf(gtffile, contig_coords=None):
@@ -466,18 +474,25 @@ def parse_gtf(gtffile, contig_coords=None):
             - A dictionary of the form id : symbol specifying, for each gene or
               transcript id, the human-friendly gene or transcript symbol
               (aka the gene/transcript name).
+            - transcript_interval_tree: tree of cds coordinates and the
+              transcripts they belnog to.
+            - gene_intervals: dictionary of transcripts to a tree of cds
+              coordinates.
     """
     # Note to self: Stupid GTFs are stupid 1-indexed with stupid inclusive ends
     with safe_open(gtffile, 'r') as g:
         gtf = g.readlines()
 
     gene_coords = OrderedDict()
+    # gene_intervals = OrderedDict()
     id_to_symbol = dict()
     transcript_to_gene_id = dict()
-    
+    # transcript_interval_tree = IntervalTree()
+
     if contig_coords is not None:
         for chrom in contig_coords.keys():
             gene_coords[chrom] = OrderedDict()
+            # gene_intervals[chrom] = OrderedDict()
 
     for line in gtf:
         line = line.replace("/", "_")
@@ -489,26 +504,54 @@ def parse_gtf(gtffile, contig_coords=None):
         contig_name = mandatory_items[0]
         if contig_name not in gene_coords.keys():
             gene_coords[contig_name] = OrderedDict()
+            # gene_intervals[contig_name] = OrderedDict()
+
         annotation_type = mandatory_items[2]
         start = int(mandatory_items[3]) - 1  # adding the -1 here to convert to 0 indexing
         stop = int(mandatory_items[4])  # not adding -1 because, while GTF is 1-indexed, its inclusive-ended.
         if contig_coords is not None:   # Converting to standard 0-indexing would mean 1-10 in GTF is equivelent to [0:10]
-            start += contig_coords[contig_name]
-            stop += contig_coords[contig_name]
+            start += contig_coords[contig_name][0]
+            stop += contig_coords[contig_name][0]
+
         strand = mandatory_items[6]
+        # interval_start, interval_stop = start, stop
+        # interval_strand = 1
+
         if strand == '-':
             start, stop = stop, start
+            # interval_strand = -1
+
         if annotation_type.lower() == "cds":
             if custom_items['transcript_id'] not in gene_coords[contig_name].keys():
                 gene_coords[contig_name][custom_items['transcript_id']] = tuple()
+                # gene_intervals[contig_name][custom_items['transcript_id']] = IntervalTree()
             transcript_to_gene_id[custom_items['transcript_id']] = custom_items['gene_id']
             id_to_symbol[custom_items['gene_id']] = custom_items['gene_id']
             id_to_symbol[custom_items['transcript_id']] = custom_items['transcript_id']
             gene_coords[contig_name][custom_items['transcript_id']] += ((start, stop),)
-
+            # transcript_interval_tree[interval_start:interval_stop] = custom_items['transcript_id']
+            # gene_intervals[contig_name][custom_items['transcript_id']].add(Interval(interval_start, interval_stop, interval_strand))
     for chrom in gene_coords.keys():
         gene_coords[chrom] = OrderedDict(sorted(gene_coords[chrom].items(), key=lambda item: min(item[1][0][0], item[1][-1][-1])))
-    return gene_coords, transcript_to_gene_id, id_to_symbol
+    return gene_coords, transcript_to_gene_id, id_to_symbol#, transcript_interval_tree, gene_intervals
+
+
+# def retrieve_transcripts_in_region_interval_tree(start, stop, transcript_interval_tree, transcript_intervals):
+#     # genes = OrderedDict()
+#     # for gene, coords in gene_coords.items():
+#     #     gene_start = min(coords[0][0], coords[-1][-1])
+#     #     gene_end = max(coords[0][0], coords[-1][-1])
+#     #     if gene_start > stop:  # if gene begins after region, stop iteration.
+#     #         break
+#     #     elif gene_start >= start:  # if gene begins after start of region and before end of region, record gene
+#     #         genes[gene] = coords
+#     #         if gene_end >= stop:  # if the gene begins within region but ends after region, adjust end of region.
+#     #             stop = gene_end + 1
+#     transcripts_in_region = IntervalTree(transcript_interval_tree[start:stop])
+#     stop = transcripts_in_region.end()
+#     transcript_coords = {t.data:transcript_intervals[t.data] for t in transcripts_in_region}
+#     return transcript_coords, stop
+#     # pass
 
 
 def retrieve_transcripts_in_region(start, stop, gene_coords):

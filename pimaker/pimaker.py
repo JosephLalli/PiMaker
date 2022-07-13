@@ -12,14 +12,13 @@ compiling results into summary dataframes.
 
 import os
 import sys
-import shutil
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
 import multiprocessing as mp
 import fileio
 import filters
-import chunk
+import chunk_sequence
 import args as args_module
 from timeit import default_timer as timer
 
@@ -81,7 +80,7 @@ def make_pi(vcf_file, ref_fasta, gtf_file=None,
             Optional, default 1e6. Number of nucleotides of each contig's
             reference sequence to be processed per chunk. If 0, each contig
             will be placed into the chunk queue as one chunk.
-        cache_folder: 
+        cache_folder:
             Optional, default None. Folder for PiMaker to save cached,
             processed variant data.
         num_processes:
@@ -107,20 +106,23 @@ def make_pi(vcf_file, ref_fasta, gtf_file=None,
     output_file_prefix, cache_folder = fileio.setup_environment(output_file_prefix,
                                                                 cache_folder=cache_folder)
 
-    if mutation_rates:
+    if mutation_rates is not None:
         mutation_rates = fileio.read_mutation_rates(mutation_rates)
 
     num_sites_dict = filters.make_num_sites_dict(mutation_rates, include_stop_codons)
     synon_cts = filters.make_synon_nonsynon_site_dict(num_sites_dict, include_stop_codons)
 
     print (f'Loading reference sequence from {ref_fasta}...')
-    ref_array, contig_starts, contig_coords = fileio.load_references(ref_fasta)
+    ref_array, contig_coords = fileio.load_references(ref_fasta)
+    print (chunk_size, f'int({ref_array.shape[1]}/{num_processes})', int(len(ref_array)/num_processes))
+    #  Alter chunk size to ensure it isn't larger than genome_length/# of cores:
+    chunk_size = min(chunk_size, int(ref_array.shape[1]/num_processes))
 
     sample_list = fileio.get_sample_list(vcf_file)
     num_var = fileio.get_num_var(vcf_file)
 
     print (f'Loading annotation information from {gtf_file}...')
-    gene_coords, transcript_to_gene_id, id_to_symbol = fileio.parse_gtf(gtf_file, contig_starts)
+    gene_coords, transcript_to_gene_id, id_to_symbol = fileio.parse_gtf(gtf_file, contig_coords)
 
     # Now that data is loaded, set up multiprocessing queues
     chunk_queue = mp.Queue(num_processes * 2)
@@ -130,19 +132,20 @@ def make_pi(vcf_file, ref_fasta, gtf_file=None,
     # Create process to load queue with chunks of data
     iterator_args = vcf_file, ref_array, contig_coords, gene_coords, chunk_queue, tqdm_lock
     iterator_kwargs = {'num_var': num_var, 'num_processes': num_processes, 'chunk_size': chunk_size, 'maf': maf}
-    iterator_process = mp.Process(target=chunk.iterate_records, args=iterator_args, kwargs=iterator_kwargs)
+    iterator_process = mp.Process(target=chunk_sequence.iterate_records, args=iterator_args, kwargs=iterator_kwargs)
     iterator_process.start()
 
     # Create processes to process chunks of data
-    chunk_args = (chunk_queue, results_queue, sample_list, id_to_symbol, transcript_to_gene_id, synon_cts, tqdm_lock)
-    executors = [mp.Process(target=chunk.process_chunk, args=chunk_args + (i,)) for i in range(num_processes)]
+    chunk_args = (chunk_queue, results_queue, sample_list, id_to_symbol, transcript_to_gene_id, synon_cts, contig_coords, tqdm_lock)
+    executors = [mp.Process(target=chunk_sequence.process_chunk, args=chunk_args + (i,)) for i in range(num_processes)]
     for executor in executors:
         executor.start()
 
+    contigs_with_variants = list(fileio.get_num_var(vcf_file, contig=True).keys())
     # Set up lists to collect the locations of result files
     result_files_sample_pi = list()
     result_files_genes_pi = list()
-    result_files_sites_pi = {contig: list() for contig in contig_starts.keys()}
+    result_files_sites_pi = {contig: list() for contig in contigs_with_variants}
 
     # Wait for results to come in, save to HDD to save memory and store result file locations
     none_tracker = 0
@@ -171,10 +174,13 @@ def make_pi(vcf_file, ref_fasta, gtf_file=None,
 
     # Else, compile formatted, collated reports
     print ('Making gene reports...')
-    
+    naValues = ['-1.#IND', '1.#QNAN', '1.#IND', '-1.#QNAN', '#N/A', 'N/A', '#NA', 'NULL', 'NaN', '-NaN', 'nan', '-nan', '', '*']
+    read_tsv_args = {'sep': '\t', 'keep_default_na': False, 'na_values': naValues}
+    read_csv_args = {'keep_default_na': False, 'na_values': naValues}
+
     pi_per_gene_df = list()
     for gene_filename in result_files_genes_pi:
-        pi_per_gene_df.append(pd.read_csv(gene_filename))
+        pi_per_gene_df.append(pd.read_csv(gene_filename), (read_csv_args))
     pi_per_gene_df = pd.concat(pi_per_gene_df)
 
     def _weighted_avg_nonsynon(x):
@@ -211,10 +217,10 @@ def make_pi(vcf_file, ref_fasta, gtf_file=None,
         del pi_per_gene_df
 
     print ('Making sample report...')
-    pi_per_sample_df = pd.DataFrame()
+    pi_per_sample_df = list()
     for sample_filename in result_files_sample_pi:
-        pi_per_sample_df = pi_per_sample_df.append(pd.read_csv(sample_filename))
-
+        pi_per_sample_df.append(pd.read_csv(sample_filename))
+    pi_per_sample_df = pd.concat(pi_per_sample_df)
     # Stitch together chunks using groupby.
     # note that both per_site stats and per_gene stats are not going to be
     # affected by chunking, since chunks are always divided in intergenic
@@ -234,13 +240,19 @@ def make_pi(vcf_file, ref_fasta, gtf_file=None,
         del pi_per_sample_df
 
     print ('Making contig report...')
-    contig_dfs = pd.DataFrame()
+    contig_dfs = list()
     contig_pis = {contig: (None, None) for contig in result_files_sites_pi.keys()}
     contig_lengths = {contig: (contig_coords[contig][1] - contig_coords[contig][0])
                       for contig in contig_coords.keys()}
 
     for contig, site_chunk_filenames in result_files_sites_pi.items():
-        site_pi_df = pd.read_csv(site_chunk_filenames[0])
+        try:
+            site_pi_df = pd.read_csv(site_chunk_filenames[0])
+        except IndexError as e:
+            print (contig)
+            print (site_chunk_filenames)
+            raise e
+        
         for filename in site_chunk_filenames[1:]:
             df = pd.read_csv(filename)
             site_pi_df = site_pi_df.merge(df, on=['sample_id', 'contig', 'stat_name'])
@@ -251,8 +263,8 @@ def make_pi(vcf_file, ref_fasta, gtf_file=None,
         # delete contig's per-site data and clear per-site tmp files right away,
         # since this is a huge file
         del site_pi_df
-        for filename in site_chunk_filenames:
-            os.remove(filename)
+        # for filename in site_chunk_filenames:
+        #     os.remove(filename)
 
         # Now, process per-contig data
         sample_contig_stats = [{'sample_id': sample_id, 'contig': contig, 'contig_length': contig_lengths[contig], 'pi': pi}
@@ -267,14 +279,14 @@ def make_pi(vcf_file, ref_fasta, gtf_file=None,
         if not return_results:
             del pi_per_contig_df
         else:
-            contig_dfs = contig_dfs.append(pi_per_contig_df)
+            contig_dfs.append(pi_per_contig_df)
 
     # delete temp folder
-    shutil.rmtree(cache_folder)
+    # shutil.rmtree(cache_folder)
 
     # Finally, return results or filenames of results
     if return_results:
-        return pi_per_sample_df, contig_dfs, pi_per_gene_df
+        return pi_per_sample_df, pd.concat(contig_dfs), pi_per_gene_df
     else:
         return None
 

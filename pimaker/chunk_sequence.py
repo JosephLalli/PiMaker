@@ -9,15 +9,17 @@ create chunks of data or to perform calculations on that chunk of data.
 
 import numpy as np
 from tqdm import tqdm
-import pickle
+# import pickle
 import fileio
 import calcpi
 import filters
 import utils
+# from intervaltree import Interval, IntervalTree
 
 
 def process_chunk(chunk_queue, result_queue, sample_list, id_to_symbol,
-                  transcript_to_gene_id, synon_cts, tqdm_lock, process_id, pi_only=False):
+                  transcript_to_gene_id, synon_cts, contig_coords, tqdm_lock, process_id,
+                  pi_only=False):
     """
     A worker function that takes data from queue of chunks of
     sequences/metadata, calculates all relevent statistics, and places them in
@@ -70,6 +72,7 @@ def process_chunk(chunk_queue, result_queue, sample_list, id_to_symbol,
                 pbar.close()
                 pbar.reset()
                 break
+            # note: transcript_coords now links to a intervaltree of cds coords, not a tuple of cds coords
             read_cts, var_pos, transcript_coords, ref_array_chunk, bin_start, bin_end, contig, chunk_id = chunk
             pbar.reset()
             pbar.set_description(f'{contig}:{bin_start}-{bin_end}')
@@ -122,7 +125,7 @@ def process_chunk(chunk_queue, result_queue, sample_list, id_to_symbol,
                 chunk_transcript_pi.extend(process_transcript(*transcript_args))
                 pbar.update(1)
             pbar.refresh()
-            result_queue.put((contig, chunk_id, chunk_sample_pi, chunk_transcript_pi, chunk_site_pi, var_pos))
+            result_queue.put((contig, chunk_id, chunk_sample_pi, chunk_transcript_pi, chunk_site_pi, var_pos + bin_start - contig_coords[contig][0]))
             # to_save = (read_cts, var_pos, transcript_coords, ref_array_chunk, bin_start, bin_end, contig,
             #            chunk_id, piMath, freq_cts, chunk_per_site_pi, chunk_per_sample_pi, chunk_sample_pi,
             #            chunk_site_pi, read_cts[:, transcript_var_slice, :],
@@ -193,9 +196,16 @@ def iterate_records(vcf_file, ref_array, contig_coords, transcript_coords, chunk
     if num_var is None:
         num_var = fileio.get_num_var(vcf_file)
 
+    num_var = fileio.get_num_var(vcf_file, contig=True)
+    contigs_with_variants = list(num_var.keys())
+    num_var = sum(list(num_var.values()))
+
     chunk_id = 0
     with tqdm(position=1) as pbar:
         for contig, (contig_start, contig_end) in contig_coords.items():
+            if contig not in contigs_with_variants:
+                pbar.update(1)
+                continue
             pbar.set_description(f'Loading contig {contig}')
             pbar.refresh()
             bin_start = contig_start
@@ -209,6 +219,7 @@ def iterate_records(vcf_file, ref_array, contig_coords, transcript_coords, chunk
                 if bin_end > contig_end:
                     bin_end = contig_end
                 transcripts, bin_end = fileio.retrieve_transcripts_in_region(bin_start, bin_end, transcript_coords[contig])
+                # transcripts, bin_end = fileio.retrieve_transcripts_in_region_interval_tree(bin_start, bin_end, transcript_interval_tree, gene_intervals)
                 transcripts = {t: tuple((exon_start - bin_start, exon_end - bin_start)
                                for exon_start, exon_end in coords) for t, coords in transcripts.items()}
 
@@ -224,12 +235,13 @@ def iterate_records(vcf_file, ref_array, contig_coords, transcript_coords, chunk
 
                 # allel is 1-indexed
                 region_string = f'{contig}:{bin_start - contig_coords[contig][0]+1}-{bin_end - contig_coords[contig][0]+1}'
+                # print (f'\n\n{region_string}\n\n')
                 read_cts, var_pos = fileio.vcf_to_numpy_array_read_cts(vcf_file, contig_coords[contig], region=region_string, maf=maf)
-                if read_cts is None: #if no mutations in region string
+                if read_cts is None:  # if no mutations in region string
                     chunk_id += 1
                     pbar.update(1)
                     continue
-                chunk_queue.put((read_cts, var_pos - bin_start, transcripts, ref_array[:, bin_start:bin_end+1, :], bin_start, bin_end, contig, chunk_id))
+                chunk_queue.put((read_cts, var_pos - bin_start, transcripts, ref_array[:, bin_start: bin_end+1, :], bin_start, bin_end, contig, chunk_id))
                 chunk_id += 1
                 pbar.update(1)
             pbar.refresh()
